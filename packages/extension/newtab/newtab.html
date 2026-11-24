@@ -189,6 +189,10 @@
             <span>API Key</span>
             <input type="password" id="provider-key" autocomplete="off" spellcheck="false" placeholder="本机接口可留空" />
           </label>
+          <label class="radio">
+            <input type="checkbox" id="provider-disable-thinking" checked />
+            关闭思考模式（DeepSeek 专属；抽取更快更省，其他接口忽略）
+          </label>
           <p class="hint muted" id="provider-status">尚未配置模型</p>
           <p class="error multiline" id="provider-error" hidden></p>
           <div class="row">

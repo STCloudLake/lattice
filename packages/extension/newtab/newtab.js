@@ -113,6 +113,7 @@ const els = {
   providerError: $('provider-error'),
   btnProviderModels: $('btn-provider-models'),
   providerModelList: $('provider-model-list'),
+  providerDisableThinking: $('provider-disable-thinking'),
   btnProviderTest: $('btn-provider-test'),
   btnProviderSave: $('btn-provider-save'),
 
@@ -246,8 +247,9 @@ function sanitizeProviderConfig(value) {
   const baseUrl = typeof value.baseUrl === 'string' ? value.baseUrl.trim() : '';
   const model = typeof value.model === 'string' ? value.model.trim() : '';
   const apiKey = typeof value.apiKey === 'string' ? value.apiKey : '';
+  const disableThinking = value.disableThinking !== false;
   if (!baseUrl && !model && !apiKey) return null;
-  return { preset, baseUrl, model, apiKey };
+  return { preset, baseUrl, model, apiKey, disableThinking };
 }
 
 async function loadProviderConfig() {
@@ -305,6 +307,7 @@ function readProviderForm() {
     baseUrl: els.providerBaseUrl.value.trim(),
     model: els.providerModel.value.trim(),
     apiKey: els.providerKey.value,
+    disableThinking: els.providerDisableThinking.checked,
   };
 }
 
@@ -351,6 +354,7 @@ function fillProviderForm() {
   els.providerBaseUrl.value = config ? config.baseUrl : presetDefaults.baseUrl;
   els.providerModel.value = config ? config.model : presetDefaults.model;
   els.providerKey.value = config ? config.apiKey : '';
+  els.providerDisableThinking.checked = config ? config.disableThinking !== false : true;
   showProviderError('');
   paintProviderStatus();
 }

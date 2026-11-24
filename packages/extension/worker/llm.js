@@ -80,6 +80,7 @@ export function normalizeProvider(raw, options = {}) {
   const baseUrl = typeof input.baseUrl === 'string' ? input.baseUrl.trim() : '';
   const model = typeof input.model === 'string' ? input.model.trim() : '';
   const apiKey = typeof input.apiKey === 'string' ? input.apiKey.trim() : '';
+  const disableThinking = input.disableThinking !== false;
 
   if (!baseUrl) throw new ProviderError('请先填写接口地址（例如 https://api.deepseek.com）');
   parseBaseUrl(baseUrl);
@@ -87,7 +88,7 @@ export function normalizeProvider(raw, options = {}) {
   if (!apiKey && !isLocalBaseUrl(baseUrl)) {
     throw new ProviderError('请先填写 API Key（本机接口可留空）');
   }
-  return { preset, baseUrl, model, apiKey };
+  return { preset, baseUrl, model, apiKey, disableThinking };
 }
 
 /** Human-readable label for the UI and the event actor: `deepseek-flash (deepseek)`. */
@@ -210,6 +211,13 @@ export function createLlmPort(rawProvider, options = {}) {
         stream: false,
       };
       if (Number.isFinite(request.maxTokens)) body.max_tokens = Math.round(request.maxTokens);
+      // DeepSeek enables thinking (effort=high) by default and ignores temperature
+      // there. Structured extraction does not benefit, so it is off by default.
+      // Sent only for the DeepSeek preset: other OpenAI-compatible servers may
+      // reject unknown body fields.
+      if (provider.preset === 'deepseek') {
+        body.thinking = { type: provider.disableThinking ? 'disabled' : 'enabled' };
+      }
       return chatRequest(provider, body, options);
     },
   };
