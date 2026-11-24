@@ -280,18 +280,33 @@
       const area = storageArea();
       if (!area) return;
       const now = new Date();
-      const [rawSettings, rawState, board, rawGuard] = await Promise.all([
+      const [rawSettings, rawState, board, rawGuard, optOut] = await Promise.all([
         Shared.readKey(area, Shared.KEYS.interruptSettings, null),
         Shared.readKey(area, Shared.KEYS.interruptState, null),
         Shared.readKey(area, Shared.KEYS.billboard, null),
         Shared.readKey(area, Shared.KEYS.shownGuard, null),
+        Shared.readAmbientOptOut(area),
       ]);
       const settings = Shared.normalizeInterruptSettings(rawSettings);
       if (!settings.sidebar) return;
+      // M2c: the master ambient toggle and "此站不再显示" also silence the sidebar.
+      if (!settings.ambient) return;
+      if (Shared.isHostOptedOut(hostname, optOut)) return;
       const interruptState = Shared.normalizeInterruptState(rawState, Shared.dayOf(now));
       if (!Shared.budgetStatus(settings, interruptState, now).allowed) return;
-      const items = Shared.pickSidebarItems(board, rawGuard, settings, siteKey, now, MAX_ITEMS);
+      const items = Shared.pickSidebarItems(
+        board,
+        rawGuard,
+        settings,
+        siteKey,
+        now,
+        MAX_ITEMS,
+        Shared.pageReservedSet(root),
+      );
       if (items.length === 0) return;
+      // Reserve across surfaces on this page BEFORE any await so the ambient
+      // cards can never pick the same proposition (shared isolated world).
+      Shared.reservePageIds(root, items.map((item) => item.propositionId));
       const claim = await Shared.claimInterrupt(area, now);
       if (!claim.ok) return;
       state.claimed = true;
@@ -316,6 +331,10 @@
       }
     } finally {
       state.booting = false;
+      // Signals ambient.js that this page's billboard decision is finished. The
+      // two scripts share one isolated world, so a video page can enforce
+      // "max 1 ambient surface" without a timing race.
+      root.__latticeSidebarSettled = true;
     }
   }
 

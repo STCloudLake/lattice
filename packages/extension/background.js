@@ -27,7 +27,7 @@ if (typeof importScripts === 'function') {
 const PushShared = globalThis.LatticeBillboard;
 
 /** Shown in 诊断 so a stale service worker is visible instead of silent. */
-const BUILD = 'm2b-1';
+const BUILD = 'm2c-ambient-1';
 
 const MENU_SELECTION = 'lattice-capture-selection';
 const PENDING_KEY = 'latticePendingCapture';
@@ -101,8 +101,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message.type === 'lattice-open-newtab') {
-    void openNewtab();
+    const focus = typeof message.focus === 'string' && message.focus.length > 0 ? message.focus : '';
+    void openNewtab(focus ? `?focus=${encodeURIComponent(focus)}` : '');
     sendResponse({ ok: true });
+    return true;
+  }
+  if (message.type === 'lattice-open-search') {
+    // M2c: "感兴趣" jumps to the platform's own search; content scripts must
+    // never navigate the current tab, so the background opens the new tab.
+    const platform = message.platform === 'youtube' ? 'youtube' : message.platform === 'bilibili' ? 'bilibili' : '';
+    const query = typeof message.query === 'string' ? message.query.trim().slice(0, 120) : '';
+    const url = platform && query && PushShared ? PushShared.searchUrl(platform, query) : '';
+    if (!url) {
+      sendResponse({ ok: false, error: '无法生成站内搜索地址' });
+      return true;
+    }
+    void openUrl(url);
+    sendResponse({ ok: true, url });
     return true;
   }
   return false;
@@ -112,12 +127,23 @@ function newtabUrl(query = '') {
   return chrome.runtime.getURL('newtab/newtab.html' + query);
 }
 
-async function openNewtab() {
+async function openNewtab(query = '') {
   try {
-    await chrome.tabs.create({ url: newtabUrl() });
+    await chrome.tabs.create({ url: newtabUrl(query) });
     return true;
   } catch (error) {
     console.error('[Lattice] 打开新标签页失败', error);
+    return false;
+  }
+}
+
+/** Opens a validated platform-search URL in a new tab. */
+async function openUrl(url) {
+  try {
+    await chrome.tabs.create({ url });
+    return true;
+  } catch (error) {
+    console.error('[Lattice] 打开站内搜索失败', error);
     return false;
   }
 }

@@ -120,7 +120,24 @@ async function startStubProvider() {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(
         '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>B站测试页</title></head>' +
-          '<body><h1>fake bilibili page</h1><p>用于验证 Lattice 侧栏 content script。</p></body></html>',
+          '<body><h1>fake bilibili page</h1><p>用于验证 Lattice 侧栏 / 评论区 / 推荐位 content script。</p>' +
+          '<div id="comment"><div class="reply-list">' +
+          '<div class="reply-item"><span class="user-name">real_user</span> 这是真实用户评论内容。</div>' +
+          '<div class="reply-item"><span class="user-name">another_user</span> 第二条真实评论。</div>' +
+          '</div></div>' +
+          '<div class="rec-list"><div class="video-page-card-small">真实推荐视频</div></div>' +
+          '</body></html>',
+      );
+      return;
+    }
+    if (req.method === 'GET' && String(req.url ?? '').startsWith('/generic')) {
+      // Generic local page for the ambient-pill test: no video containers, no
+      // layout mutation should be observable.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(
+        '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>普通页面</title></head>' +
+          '<body><main><h1>generic article</h1><p>正文内容，用来验证环境胶囊不会改变布局。</p>' +
+          '<div style="height:1200px"></div></main></body></html>',
       );
       return;
     }
@@ -202,6 +219,22 @@ async function waitForJson(url, timeoutMs = 20000) {
     await sleep(120);
   }
   throw new Error(`等待 ${url} 超时：${lastError && lastError.message}`);
+}
+
+/** Polls /json/list for a target whose URL matches. */
+async function findTargetUrl(match, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const targets = await fetch(`${BASE}/json/list`).then((response) => response.json());
+      const found = targets.find((target) => typeof target.url === 'string' && match(target.url));
+      if (found) return found;
+    } catch {
+      /* browser still starting */
+    }
+    await sleep(120);
+  }
+  return null;
 }
 
 /** Minimal CDP client over the global WebSocket (Node 22). */
@@ -849,7 +882,7 @@ async function main() {
     assert.equal(notificationsDefault, false, '系统通知默认必须关闭');
     await harness.eval(`
       (() => {
-        const limit = document.querySelector('input[name="interrupt-limit"][value="2"]');
+        const limit = document.querySelector('input[name="interrupt-limit"][value="3"]');
         limit.checked = true;
         limit.dispatchEvent(new Event('change', { bubbles: true }));
         const setValue = (id, value) => {
@@ -866,17 +899,24 @@ async function main() {
     await harness.waitForAsync(
       `chrome.storage.local.get("latticeInterruptSettings").then((got) => {
          const settings = got.latticeInterruptSettings || {};
-         return settings.dailyLimit === 2 && settings.quietStart === '00:00' &&
-           settings.quietEnd === '00:00' && settings.notifications === false && settings.sidebar === true;
+         return settings.dailyLimit === 3 && settings.quietStart === '00:00' &&
+           settings.quietEnd === '00:00' && settings.notifications === false && settings.sidebar === true &&
+           settings.ambient === true && settings.injectComments === true && settings.searchJump === true;
        })`,
       '打扰设置写入 chrome.storage.local',
     );
     const storedInterrupt = await readStorageJson(harness, 'latticeInterruptSettings');
     console.log(`settings: ${JSON.stringify(storedInterrupt)}`);
-    assert.equal(storedInterrupt.dailyLimit, 2);
+    assert.equal(storedInterrupt.dailyLimit, 3);
     assert.equal(storedInterrupt.notifications, false);
     assert.equal(storedInterrupt.sidebar, true);
+    assert.equal(storedInterrupt.ambient, true, '任意网页显示默认开启');
+    assert.equal(storedInterrupt.injectComments, true, '评论/推荐注入默认开启');
+    assert.equal(storedInterrupt.searchJump, true, '站内搜索跳转默认开启');
     await harness.eval('document.getElementById("btn-settings-close").click()');
+    // M2c test override: make all ambient surfaces appear regardless of the
+    // 25%/50% roll (the real random path is covered by m2c-smoke.mjs).
+    await harness.eval('chrome.storage.local.set({ latticeForceAmbient: true })');
     // Make sure the sidebar has a fresh billboard snapshot to read.
     await harness.waitForAsync(
       `chrome.storage.local.get("latticeBillboard").then((got) => {
@@ -928,13 +968,85 @@ async function main() {
     assert.match(sidebarState.text, /知道了/);
     assert.match(sidebarState.text, /不感兴趣/);
     assert.ok(sidebarState.difficulty >= 1, '侧栏应渲染难度星级');
-    const queuedAfterRender = await readStorageJson(harness, 'latticePendingExposures');
-    assert.ok(
-      Array.isArray(queuedAfterRender) && queuedAfterRender.length === 2,
-      `侧栏 shown 应入队 2 条（实际 ${Array.isArray(queuedAfterRender) ? queuedAfterRender.length : 'null'}）`,
+    await sidebarHarness.waitFor(
+      'document.querySelector(\'[data-lattice="comment"]\') !== null',
+      '评论区注入卡片',
+      15000,
     );
-    assert.ok(queuedAfterRender.every((entry) => entry.kind === 'shown' && entry.surface === 'sidebar'));
-    const sidebarShownIds = queuedAfterRender.map((entry) => entry.propositionId);
+    await sidebarHarness.waitFor(
+      'document.querySelector(\'[data-lattice="recommend"]\') !== null',
+      '推荐位注入卡片',
+      15000,
+    );
+    const surfaces = await sidebarHarness.eval(`(() => {
+      const inspect = (surface) => {
+        const node = document.querySelector('[data-lattice="' + surface + '"]');
+        if (!node) return null;
+        return {
+          text: node.textContent,
+          badge: node.querySelector('.lattice-badge') ? node.querySelector('.lattice-badge').textContent : '',
+          fake: node.querySelectorAll('[class*="avatar"],[class*="user-name"],[class*="username"],[class*="like"]').length,
+          statement: node.querySelector('.lattice-card-statement') ? node.querySelector('.lattice-card-statement').textContent : '',
+          propositionId: node.getAttribute('data-proposition-id'),
+          parentId: node.parentNode ? node.parentNode.id : '',
+        };
+      };
+      return { comment: inspect('comment'), recommend: inspect('recommend') };
+    })()`);
+    console.log(
+      `surface: comment=${surfaces.comment ? '✓' : '✗'} recommend=${surfaces.recommend ? '✓' : '✗'}（评论区/推荐位均带 Lattice 标识）`,
+    );
+    const surfaceCountsAtRender = await sidebarHarness.eval(`({
+      comment: document.querySelectorAll('[data-lattice="comment"]').length,
+      recommend: document.querySelectorAll('[data-lattice="recommend"]').length,
+    })`);
+    assert.equal(surfaceCountsAtRender.comment, 1, '评论区每页最多注入 1 条');
+    assert.equal(surfaceCountsAtRender.recommend, 1, '推荐位每页最多注入 1 条');
+    assert.equal(
+      await sidebarHarness.eval('document.getElementById("lattice-ambient") === null'),
+      true,
+      '视频页已有侧栏时不应再出现环境胶囊（每页最多 1 个环境表面）',
+    );
+    assert.ok(surfaces.comment, '评论区注入卡片应存在');
+    assert.ok(surfaces.recommend, '推荐位注入卡片应存在');
+    for (const surface of ['comment', 'recommend']) {
+      const card = surfaces[surface];
+      assert.match(card.badge, /Lattice/, `${surface} 卡片必须带 Lattice 标识`);
+      assert.equal(card.fake, 0, `${surface} 卡片不应伪造用户名/头像/点赞结构`);
+      assert.doesNotMatch(card.text, /网友|点赞|\d+\s*楼|回复/, `${surface} 卡片不应出现评论/点赞框架`);
+      assert.ok(card.statement.length > 0, `${surface} 卡片应有命题正文`);
+    }
+    // recordShown() writes are async; wait until all three surfaces' shown records
+    // are in the queue before inspecting counts.
+    await harness.waitForAsync(
+      `chrome.storage.local.get("latticePendingExposures").then((got) => {
+         const shown = (got.latticePendingExposures || []).filter((entry) => entry.kind === 'shown');
+         return shown.filter((entry) => entry.surface === 'sidebar').length === 2 &&
+           shown.filter((entry) => entry.surface === 'comment').length === 1 &&
+           shown.filter((entry) => entry.surface === 'recommend').length === 1;
+       })`,
+      '三类表面 shown 全部入队',
+    );
+    const queuedAfterRender = await readStorageJson(harness, 'latticePendingExposures');
+    const shownAfterRender = (queuedAfterRender || []).filter((entry) => entry.kind === 'shown');
+    assert.equal(shownAfterRender.filter((entry) => entry.surface === 'sidebar').length, 2, '侧栏 2 条 shown');
+    assert.equal(shownAfterRender.filter((entry) => entry.surface === 'comment').length, 1, '评论区 1 条 shown');
+    assert.equal(shownAfterRender.filter((entry) => entry.surface === 'recommend').length, 1, '推荐位 1 条 shown');
+    const sidebarShownIds = shownAfterRender.filter((entry) => entry.surface === 'sidebar').map((entry) => entry.propositionId);
+
+    // M2c: "感兴趣" on the comment card -> same-platform search tab.
+    await sidebarHarness.eval(`document.querySelector('[data-lattice="comment"] .lattice-primary').click()`);
+    await harness.waitForAsync(
+      `chrome.storage.local.get("latticePendingExposures").then((got) => {
+         const queue = got.latticePendingExposures || [];
+         return queue.some((entry) => entry.kind === 'engaged' && entry.surface === 'comment');
+       })`,
+      '评论区「感兴趣」engaged 入队',
+    );
+    const searchTarget = await findTargetUrl((url) => url.startsWith('https://search.bilibili.com/all?keyword='), 10000);
+    assert.ok(searchTarget, '「感兴趣」应打开 bilibili 站内搜索标签页');
+    console.log(`search:  ${searchTarget.url.slice(0, 64)}…`);
+    await fetch(`${BASE}/json/close/${searchTarget.id}`).catch(() => {});
     const sidebarKnowText = await sidebarHarness.eval(`(() => {
       const button = document.querySelector('#lattice-sidebar .lattice-primary');
       if (!button) return '';
@@ -950,7 +1062,7 @@ async function main() {
     );
     const queuedAfterKnow = await readStorageJson(harness, 'latticePendingExposures');
     console.log(`sidebar: ${sidebarKnowText.trim()} -> queue ${queuedAfterKnow.length} 条`);
-    const engagedEntry = queuedAfterKnow.find((entry) => entry.kind === 'engaged');
+    const engagedEntry = queuedAfterKnow.find((entry) => entry.kind === 'engaged' && entry.surface === 'sidebar');
     assert.ok(engagedEntry, '应有 engaged 记录');
     assert.equal(engagedEntry.propositionId, sidebarShownIds[0]);
     const sidebarAfterKnow = await sidebarHarness.eval(`({
@@ -975,7 +1087,18 @@ async function main() {
     );
     const queuedAfterSkip = await readStorageJson(harness, 'latticePendingExposures');
     console.log(`sidebar: ${String(sidebarSkipText).trim()} -> queue ${queuedAfterSkip.length} 条（尚未 drain）`);
-    assert.equal(queuedAfterSkip.length, 4);
+    const surfaceCounts = queuedAfterSkip.reduce((counts, entry) => {
+      const key = `${entry.surface}/${entry.kind}`;
+      counts[key] = (counts[key] || 0) + 1;
+      return counts;
+    }, {});
+    console.log(`queue:   ${JSON.stringify(surfaceCounts)}`);
+    assert.equal(surfaceCounts['sidebar/shown'], 2);
+    assert.equal(surfaceCounts['comment/shown'], 1);
+    assert.equal(surfaceCounts['recommend/shown'], 1);
+    assert.equal(surfaceCounts['comment/engaged'], 1);
+    assert.equal(surfaceCounts['sidebar/engaged'], 1);
+    assert.equal(surfaceCounts['sidebar/skipped'], 1);
     await fetch(`${BASE}/json/close/${sidebarTarget.id}`).catch(() => {});
     sidebarPage.close();
 
@@ -1000,7 +1123,8 @@ async function main() {
       'reload 后推送视图',
     );
     console.log(`reload:  ${afterReload}（seed 不重复执行）`);
-    // The sidebar queued 4 exposures (2 shown + engaged + skipped); boot drains them.
+    // Surfaces queued: sidebar 2 shown + comment/recommend 1 shown each + 2 engaged
+    // (comment, sidebar) + 1 skipped (sidebar); boot drains all of them.
     await harness.waitForAsync(
       `chrome.storage.local.get("latticePendingExposures").then((got) => {
          const queue = got.latticePendingExposures || [];
@@ -1016,14 +1140,120 @@ async function main() {
     console.log(`diag:    ${diagInterruptAfterSidebar.trim()}`);
     assert.match(
       diagFeedAfterSidebar,
-      /参与 3 · 跳过 2/,
-      '侧栏的 engaged/skipped 应已 drain 进 C 账',
+      /今日已展示 14 · 参与 4 · 跳过 2/,
+      '侧栏/评论区的 shown/engaged/skipped 应已 drain 进 C 账',
     );
     assert.match(
       diagInterruptAfterSidebar,
-      /^打扰: 上限 2 次 · 今日已用 1 · 安静 未启用 · 侧栏 开 · 通知 关 · 待入库曝光 0 条/,
+      /^打扰: 上限 3 次 · 今日已用 1 · 安静 未启用 · 侧栏 开 · 通知 关 · 待入库曝光 0 条/,
     );
+    const diagAmbientAfterSidebar = await diagLine(harness, '环境:');
+    console.log(`diag:    ${diagAmbientAfterSidebar.trim()}`);
+    assert.match(diagAmbientAfterSidebar, /^环境: 任意网页 开 · 评论注入 开 · 站内跳转 开 · 本站已屏蔽 否/);
     await harness.eval('document.getElementById("btn-diag-close").click()');
+
+    // -----------------------------------------------------------------------
+    // 8b) M2c: ambient pill on a generic local page. Fixed positioning only: the
+    //     panel must not change body layout; Esc closes it; 感兴趣 opens a focused
+    //     Lattice newtab; 此站不再显示 persists and removes the pill.
+    // -----------------------------------------------------------------------
+    const genericUrl = `http://127.0.0.1:${stub.port}/generic`;
+    const genericTarget = await fetch(`${BASE}/json/new?${encodeURIComponent('about:blank')}`, { method: 'PUT' }).then(
+      (response) => response.json(),
+    );
+    const genericPage = await Cdp.connect(genericTarget.webSocketDebuggerUrl);
+    const genericHarness = createHarness(genericPage);
+    genericPage.on('Runtime.consoleAPICalled', (params) => {
+      if (params.type !== 'error' && params.type !== 'warning') return;
+      consoleErrors.push(
+        `ambient ${params.type}: ${params.args.map((arg) => arg.value ?? arg.description ?? '').join(' ')}`,
+      );
+    });
+    genericPage.on('Runtime.exceptionThrown', (params) => {
+      consoleErrors.push(`ambient exception: ${params.exceptionDetails?.text ?? 'unknown'}`);
+    });
+    genericPage.on('Runtime.executionContextCreated', (params) => {
+      if (params.context.auxData?.isDefault) genericHarness.setContext(params.context.id);
+    });
+    await genericPage.send('Runtime.enable');
+    await genericPage.send('Page.enable');
+    await sleep(200);
+    await genericPage.send('Page.navigate', { url: genericUrl });
+    await sleep(500);
+    await genericHarness.waitFor('document.readyState === "complete"', 'generic page load');
+    await genericHarness.waitFor('document.getElementById("lattice-ambient") !== null', '环境胶囊注入', 15000);
+    const beforeExpand = await genericHarness.eval(`({
+      scrollWidth: document.body.scrollWidth,
+      children: document.body.children.length,
+      style: document.body.getAttribute('style') || '',
+      hidden: document.querySelector('#lattice-ambient .lattice-ambient-panel').hidden,
+    })`);
+    assert.equal(beforeExpand.hidden, true, '面板初始收起');
+    await genericHarness.eval(`document.querySelector('#lattice-ambient .lattice-pill').click()`);
+    await genericHarness.waitFor(
+      'document.querySelector("#lattice-ambient .lattice-ambient-panel").hidden === false',
+      '胶囊展开成面板',
+    );
+    const expanded = await genericHarness.eval(`({
+      scrollWidth: document.body.scrollWidth,
+      children: document.body.children.length,
+      style: document.body.getAttribute('style') || '',
+      text: document.querySelector('#lattice-ambient .lattice-ambient-panel').textContent,
+      width: getComputedStyle(document.querySelector('#lattice-ambient .lattice-ambient-panel')).width,
+    })`);
+    console.log(
+      `ambient: 面板 ${expanded.width} · ${String(expanded.text).replace(/\s+/g, ' ').trim().slice(0, 42)}…`,
+    );
+    assert.equal(expanded.scrollWidth, beforeExpand.scrollWidth, '展开面板不得改变 body.scrollWidth');
+    assert.equal(expanded.children, beforeExpand.children, '环境表面不得改动 <body> 子节点');
+    assert.equal(expanded.style, beforeExpand.style, '环境表面不得改动 <body> 内联样式');
+    assert.match(expanded.text, /Lattice · 知识/);
+    assert.match(expanded.text, /感兴趣/);
+    await genericHarness.key('Escape', 'Escape', 27);
+    await genericHarness.waitFor(
+      'document.querySelector("#lattice-ambient .lattice-ambient-panel").hidden === true',
+      'Esc 收起面板',
+    );
+    await genericHarness.eval(`document.querySelector('#lattice-ambient .lattice-pill').click()`);
+    await genericHarness.waitFor(
+      'document.querySelector("#lattice-ambient .lattice-ambient-panel").hidden === false',
+      '再次展开面板',
+    );
+    const ambientFocusId = await genericHarness.eval(
+      `document.querySelector('#lattice-ambient .lattice-card').getAttribute('data-proposition-id')`,
+    );
+    await genericHarness.eval(`document.querySelector('#lattice-ambient .lattice-primary').click()`);
+    await harness.waitForAsync(
+      `chrome.storage.local.get("latticePendingExposures").then((got) => {
+         const queue = got.latticePendingExposures || [];
+         return queue.some((entry) => entry.kind === 'engaged' && entry.surface === 'ambient');
+       })`,
+      '环境胶囊「感兴趣」engaged 入队',
+    );
+    const focusTarget = await findTargetUrl(
+      (url) =>
+        url.startsWith(`chrome-extension://${extensionId}/newtab/newtab.html`) &&
+        url.includes(`focus=${ambientFocusId}`),
+      10000,
+    );
+    assert.ok(focusTarget, '非视频页「感兴趣」应打开聚焦该命题的 Lattice 新标签页');
+    console.log(`ambient: 感兴趣 -> ${focusTarget.url.slice(0, 78)}…`);
+    await fetch(`${BASE}/json/close/${focusTarget.id}`).catch(() => {});
+    await genericHarness.eval(`document.querySelector('#lattice-ambient .lattice-optout').click()`);
+    await harness.waitForAsync(
+      `chrome.storage.local.get("latticeAmbientOptOut").then((got) => {
+         const list = got.latticeAmbientOptOut || [];
+         return list.includes('127.0.0.1');
+       })`,
+      '此站不再显示持久化',
+    );
+    assert.equal(
+      await genericHarness.eval('document.getElementById("lattice-ambient") === null'),
+      true,
+      '屏蔽后应立即移除胶囊',
+    );
+    await fetch(`${BASE}/json/close/${genericTarget.id}`).catch(() => {});
+    genericPage.close();
 
     // -----------------------------------------------------------------------
     // 9) exhaust the feed: the empty state is "今天的知识看完了 ✓" with a review entry
@@ -1096,7 +1326,7 @@ async function main() {
     }
     assert.equal(realErrors.length, 0, `页面出现 ${realErrors.length} 条 console 错误`);
     console.log('console: 无错误 / 无 CSP 违规');
-    console.log('\nE2E OK: 首次运行 seed、声明兴趣、自动准备内容、复习、捕获、推送、侧栏打扰预算、持久化全部通过');
+    console.log('\nE2E OK: 首次运行 seed、声明兴趣、自动准备内容、复习、捕获、推送、侧栏+评论区/推荐位、环境胶囊、站内跳转、持久化全部通过');
   } finally {
     pageClient?.close();
     browser.kill();

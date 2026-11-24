@@ -185,6 +185,9 @@ const els = {
   interruptSiteBilibili: $('interrupt-site-bilibili'),
   interruptSiteYoutube: $('interrupt-site-youtube'),
   interruptNotifications: $('interrupt-notifications'),
+  interruptAmbient: $('interrupt-ambient'),
+  interruptInject: $('interrupt-inject'),
+  interruptSearchJump: $('interrupt-search-jump'),
   interruptStatus: $('interrupt-status'),
   btnSettingsClose: $('btn-settings-close'),
 
@@ -282,6 +285,9 @@ const state = {
     emptyChecked: false,
   },
   answered: new Set(), // queue keys answered in this page session (quiz mode needs it)
+  /** M2c: `?focus=<propositionId>` from an ambient/inline "感兴趣" click. */
+  focusPropositionId: '',
+  focusConsumed: false,
   diagnostics: null,
   provider: null, // {preset, baseUrl, model, apiKey} from chrome.storage.local
   capture: null, // preview state; holds ONLY the JSON plan + display rows
@@ -469,6 +475,9 @@ function interruptFormState() {
     quietEnd: els.interruptQuietEnd ? els.interruptQuietEnd.value : base.quietEnd,
     sidebar: els.interruptSidebar ? els.interruptSidebar.checked : base.sidebar,
     notifications: els.interruptNotifications ? els.interruptNotifications.checked : base.notifications,
+    ambient: els.interruptAmbient ? els.interruptAmbient.checked : base.ambient,
+    injectComments: els.interruptInject ? els.interruptInject.checked : base.injectComments,
+    searchJump: els.interruptSearchJump ? els.interruptSearchJump.checked : base.searchJump,
     sites: {
       bilibili: els.interruptSiteBilibili ? els.interruptSiteBilibili.checked : base.sites.bilibili,
       youtube: els.interruptSiteYoutube ? els.interruptSiteYoutube.checked : base.sites.youtube,
@@ -482,7 +491,7 @@ function paintInterruptStatus() {
   const quiet = settings.quietStart === settings.quietEnd ? '未启用' : `${settings.quietStart}–${settings.quietEnd}`;
   els.interruptStatus.textContent = `每日打扰上限 ${settings.dailyLimit} 次 · 安静时段 ${quiet} · 侧栏 ${
     settings.sidebar ? '开' : '关'
-  } · 通知 ${settings.notifications ? '开' : '关'}`;
+  } · 通知 ${settings.notifications ? '开' : '关'} · 环境 ${settings.ambient ? '开' : '关'}`;
   els.interruptStatus.hidden = false;
 }
 
@@ -497,6 +506,9 @@ function fillInterruptForm() {
   if (els.interruptSiteBilibili) els.interruptSiteBilibili.checked = settings.sites.bilibili;
   if (els.interruptSiteYoutube) els.interruptSiteYoutube.checked = settings.sites.youtube;
   if (els.interruptNotifications) els.interruptNotifications.checked = settings.notifications;
+  if (els.interruptAmbient) els.interruptAmbient.checked = settings.ambient;
+  if (els.interruptInject) els.interruptInject.checked = settings.injectComments;
+  if (els.interruptSearchJump) els.interruptSearchJump.checked = settings.searchJump;
   paintInterruptStatus();
 }
 
@@ -542,6 +554,7 @@ function publishBillboard(feed) {
         statement: item.statement,
         domain: item.domain,
         reason: item.reason,
+        name: item.name,
         tier: item.tier,
         cognitive: item.cognitive,
         mastery: item.mastery && typeof item.mastery === 'object' ? item.mastery.mean : item.mastery,
@@ -620,7 +633,8 @@ async function readInterruptSnapshot() {
   try {
     const context = await PushShared.readInterruptContext(area, new Date());
     const queue = await PushShared.readExposureQueue(area).catch(() => []);
-    return { ...context, pending: queue.length };
+    const optOut = await PushShared.readAmbientOptOut(area).catch(() => []);
+    return { ...context, pending: queue.length, optOut };
   } catch {
     return null;
   }
@@ -1088,6 +1102,13 @@ async function onProviderTest() {
 async function boot() {
   state.fatal = false;
   showView('loading');
+  // M2c: ambient/inline cards can deep-link the newtab with ?focus=<propositionId>.
+  try {
+    const params = new URL(window.location.href).searchParams;
+    state.focusPropositionId = (params.get('focus') || '').slice(0, 120);
+  } catch {
+    state.focusPropositionId = '';
+  }
   try {
     await loadProviderConfig();
     await loadCaptureSettings();
@@ -1246,7 +1267,18 @@ function applyFeedResult(result) {
   state.feed.items = Array.isArray(feed.items) ? feed.items : [];
   state.feed.interests = Array.isArray(feed.interests) ? feed.interests : [];
   if (typeof feed.todayDate === 'string' && feed.todayDate.length > 0) state.feed.today = feed.todayDate;
-  // Cache the billboard for the sidebar + notification surfaces (M2b).
+  // M2c: an ambient/inline "感兴趣" on a non-video page opens
+  // newtab.html?focus=<id>. Put that item first once, so the click lands on it.
+  if (state.focusPropositionId && !state.focusConsumed) {
+    const target = state.focusPropositionId;
+    const index = state.feed.items.findIndex((item) => item && item.propositionId === target);
+    if (index > 0) {
+      const [picked] = state.feed.items.splice(index, 1);
+      state.feed.items.unshift(picked);
+    }
+    if (index >= 0) state.focusConsumed = true;
+  }
+  // Cache the billboard for the sidebar + ambient surfaces (M2b/M2c).
   publishBillboard(feed);
 }
 
@@ -1656,6 +1688,14 @@ function formatDiagnostics(info, graph) {
       `打扰: 上限 ${settings.dailyLimit} 次 · 今日已用 ${used} · 安静 ${quiet} · 侧栏 ${
         settings.sidebar ? '开' : '关'
       } · 通知 ${settings.notifications ? '开' : '关'} · 待入库曝光 ${Number(info.interrupt.pending) || 0} 条`,
+    );
+    // M2c ambient surfaces. "本站" on the newtab (extension origin) is not blocked.
+    const optOut = Array.isArray(info.interrupt.optOut) ? info.interrupt.optOut : [];
+    const localBlocked = false;
+    lines.push(
+      `环境: 任意网页 ${settings.ambient ? '开' : '关'} · 评论注入 ${settings.injectComments ? '开' : '关'} · 站内跳转 ${
+        settings.searchJump ? '开' : '关'
+      } · 本站已屏蔽 ${localBlocked ? '是' : '否'}${optOut.length > 0 ? ` · 已屏蔽 ${optOut.length} 站` : ''}`,
     );
   }
   if (info.curriculum) {
@@ -2421,6 +2461,9 @@ function wire() {
     els.interruptSiteBilibili,
     els.interruptSiteYoutube,
     els.interruptNotifications,
+    els.interruptAmbient,
+    els.interruptInject,
+    els.interruptSearchJump,
   ]) {
     if (input) input.addEventListener('change', onInterruptSettingsChanged);
   }

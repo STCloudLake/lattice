@@ -1329,6 +1329,8 @@ export class LatticeService {
       view.cueBack = cue?.back ?? '';
     }
     if (item.domain) view.domain = item.domain;
+    // M2c: the short name is the preferred "感兴趣 -> 站内搜索" query.
+    if (proposition?.name) view.name = proposition.name;
     // Difficulty is knowledge-ledger data (extract-v2 / curriculum-v2); pass it
     // through when present so the feed card, sidebar and notifications can show
     // ★ stars + a cognitive label. Old logs simply have no difficulty.

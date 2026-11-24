@@ -288,6 +288,23 @@
             <input type="checkbox" id="interrupt-notifications" />
             允许系统通知（默认关闭；每天最多 1 条，与侧栏共用预算）
           </label>
+          <hr class="divider" />
+          <p class="hint muted">
+            环境表面：右下角小胶囊、视频站评论区/推荐位卡片。任何时候都带 Lattice 标识，
+            不伪造用户评论；每站可点卡片里的「此站不再显示」永久关闭。
+          </p>
+          <label class="radio">
+            <input type="checkbox" id="interrupt-ambient" checked />
+            任意网页显示（环境胶囊，默认开启）
+          </label>
+          <label class="radio">
+            <input type="checkbox" id="interrupt-inject" checked />
+            评论区 / 推荐位注入（仅 bilibili / YouTube，默认开启）
+          </label>
+          <label class="radio">
+            <input type="checkbox" id="interrupt-search-jump" checked />
+            点击「感兴趣」跳转站内搜索（默认开启；关闭则打开 Lattice）
+          </label>
           <p class="hint muted" id="interrupt-status" hidden></p>
         </fieldset>
         <fieldset class="fieldset">

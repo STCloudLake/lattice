@@ -1,4 +1,4 @@
-# Lattice 扩展（M0 骨架 + M1 捕获 + M2a/M2b 推送与打扰预算 + M2c 兴趣/自主内容）
+# Lattice 扩展（M0 骨架 + M1 捕获 + M2 推送/打扰预算/环境表面 + M2c 兴趣/自主内容）
 
 Chrome/Edge 的 MV3 扩展：把新标签页变成 Lattice 的**今日推送**表面。
 M0 的离线数据脊柱（事件日志 → 投影 → 复习）保持不变；M1a/M1b 增加了**用户主动触发**的
@@ -6,6 +6,9 @@ M0 的离线数据脊柱（事件日志 → 投影 → 复习）保持不变；M
 M2a 把捕获的语义改成**兴趣信号**：知识像广告一样按小剂量推送，验证（复习/测验）是可选项。
 M2b 加了「看板」：B 站/YouTube 的右侧侧栏、可选的系统通知，以及一个**打扰预算**
 （每日 0–3 次 + 安静时段）让广告不变成骚扰；曝光/参与/跳过只进 C 账。
+M2c 把广告位铺到**任意网页**：右下角 44px 环境胶囊、视频站评论区/推荐位里**带 Lattice 标识**的
+原生排版卡片（绝不伪造用户评论），「感兴趣」直接跳到同平台搜索；随机出现 + 每标签页 20 分钟
+冷却 + 敏感站点硬排除，每站可「此站不再显示」。
 M2c 让用户**自己声明兴趣领域**，并由系统**主动准备内容**：首次运行就内置「计算机」「人工智能」
 入门内容；配好模型后，声明但还缺内容的领域会被自动生成，不必依赖捕获页面。
 没有后台爬取、没有遥测；数据只在本机浏览器里，可导出成纯文本 JSONL。
@@ -52,6 +55,8 @@ background.js            后台 service worker：捕获入口 + M2b 通知闹钟
 shared/billboard.js      推送层共享契约：billboard 快照/打扰预算/曝光队列/difficulty 展示
 content/sidebar.js       视频站右侧看板 content script（读快照、排队曝光、不碰数据库）
 content/sidebar.css      侧栏样式（固定右侧、可折叠、不遮挡页面控件）
+content/ambient.js       M2c 环境表面 content script：任意网页胶囊/面板 + 视频站评论区/推荐位卡片
+content/ambient.css      环境胶囊/面板/原生卡片样式（fixed 定位，不改页面布局）
 newtab/                  新标签页 UI（HTML/CSS/原生 JS，无框架、无内联脚本）
   curriculum-guard.js    M2c 页面侧「每领域每天最多生成一次」守卫（可在 Node 里测试）
 worker/                  RPC worker —— 唯一写事件日志的地方
@@ -68,6 +73,7 @@ test/capture-smoke.mjs   M1a 捕获链路冒烟测试（假 provider fetch + cov
 test/feed-smoke.mjs      M2a 推送层冒烟测试（feed 剂量/同日照去重/跳过疲劳/兴趣）
 test/curriculum-smoke.mjs M2c 声明兴趣 + seed 幂等 + 课程生成 + 每日一次守卫
 test/m2b-smoke.mjs       M2b 打扰预算/快照容错/曝光队列/侧栏 DOM/通知 picker
+test/m2c-smoke.mjs       M2c 环境表面：黑名单/随机冷却/胶囊/注入/SPA 重挂/站内跳转/无冒充
 test/extension-e2e.mjs   真实 MV3 E2E（含本地 stub provider + 真实侧栏注入）
 vendor/                  构建产物（不提交）
 ```
@@ -179,7 +185,45 @@ MV3 默认不允许 WebAssembly 编译，默认也不给扩展页面跨源隔离
 - **诊断**：新增 `打扰: 上限 N 次 · 今日已用 M · 安静 … · 侧栏 开/关 · 通知 开/关 · 待入库曝光 X 条`。
 
 权限新增 `alarms`、`notifications`；清单版本 bump 到 `0.4.0`（刷新 MV3 代码缓存；
-诊断里的 `后台: m2b-1 ✓` 可确认后台是最新版）。
+诊断里的 `后台: m2c-ambient-1 ✓` 可确认后台是最新版）。
+
+## 环境表面（M2c）
+
+推送不再只发生在新标签页和视频侧栏，而是"任意页面上的广告位"，全部**只读同一份缓存快照**
+（DB 仍只在新标签页 Worker 里）：
+
+- **环境胶囊**：任意 http(s) 页面右下角 44px 胶囊（`position: fixed`，`pointer-events` 只在
+  胶囊/面板上）；点击或悬停展开为 300px 面板（一张卡 + 领域/难度 + 感兴趣/换一条/收起/
+  此站不再显示），30 秒无交互自动收起，`Esc` 关闭。**窄屏（<1100px）只显示胶囊**，
+  点击直接打开 Lattice；环境表面不修改 `<body>` 布局，因此不会有 layout shift。
+- **评论区 / 推荐位**：bilibili（`#comment .reply-list`、`.rec-list`、`.recommend-list-v1`、
+  `.video-page-card-small`）与 YouTube（`#comments`、`ytd-comment-thread-renderer`、
+  `#secondary`、`ytd-compact-video-renderer`）各注入 **1 条**，标记
+  `data-lattice="comment"|"recommend"`。卡片继承平台字体/字号/颜色，位置在列表容器之后或
+  作为最后一个子节点——**不重排已有内容**。MutationObserver（防抖）+ URL 轮询处理 SPA：
+  容器被替换时清掉旧节点并重新挂到新容器，marker + WeakSet 保证不重复。
+- **不冒充（硬规则，见 ETHICS.md）**：卡片永远带可见的 `Lattice · 知识` 徽标；不生成假用户名/
+  头像/点赞/时间/"网友评论"框架。若某个位置只能靠伪造评论结构才放得下，就不放。
+- **随机 + 冷却 + 预算**：视频站约 50%、其它页面约 25%；同一标签页 20 分钟冷却；每日打扰预算
+  内；`latticeForceAmbient=true` 是 E2E/调试用的强制显示开关。评论区/推荐位与胶囊在
+  `force=false` 时同样消耗打扰预算（预算耗尽/安静时段就不注入）。
+- **敏感站点硬排除**：`mail.*`、`*.bank*`、支付/结账路径（checkout/payment/pay/billing/...）、
+  本地管理页（localhost /admin 等）、`chrome-extension://`，以及任何带
+  `[data-lattice-optout]` 的页面。每站可点卡片里的「此站不再显示」，hostname 存
+  `latticeAmbientOptOut: string[]`（子域同样生效）。
+- **感兴趣 → 站内搜索**：bilibili → `search.bilibili.com/all?keyword=<encoded>`，
+  YouTube → `/results?search_query=<encoded>`（query = 命题 name，否则 statement 前 24 字 +
+  领域）；由 background 用 `chrome.tabs.create` 打开，content script 不导航当前标签页。
+  非视频页/关闭跳转开关时打开 `newtab.html?focus=<propositionId>`（该卡排到最前），
+  同时记一条 `exposure.engaged(surface: ambient|comment|recommend)`。
+- **设置（⚙ → 推送）**：`任意网页显示`（默认开）、`评论区/推荐位注入`（默认开，仅视频站）、
+  `点击感兴趣跳转站内搜索`（默认开），与 M2b 的预算/安静时段/侧栏/通知同存于
+  `latticeInterruptSettings`。诊断新增
+  `环境: 任意网页 开 · 评论注入 开 · 站内跳转 开 · 本站已屏蔽 否`。
+
+清单版本 bump 到 `0.5.0`（诊断里的 `后台: m2c-ambient-1 ✓` 可确认后台是最新版）。
+注意：声明式 content script 现在匹配 `http://*/*` + `https://*/*`，即扩展会被注入到所有
+http(s) 页面（敏感站点在脚本内硬排除，不渲染任何内容）。
 
 ## 兴趣领域与自主内容（M2c）
 
@@ -223,7 +267,7 @@ aria-hidden，优先 article/main/role=main，否则按段落密度选容器，�
 
 **改完扩展文件后必须「重新加载」**：`edge://extensions` → 本扩展 → 重新加载。
 只是重启浏览器**不保证**刷新 service worker（Chromium 会按扩展版本缓存代码）。
-诊断里的 `后台: m2b-1 ✓` 就是用来暴露这个问题的——如果显示「后台: 未响应」，
+诊断里的 `后台: m2c-ambient-1 ✓` 就是用来暴露这个问题的——如果显示「后台: 未响应」，
 说明后台是旧版本，重载即可。发版时请同时 bump `manifest.json` 的 version。
 
 ## 捕获文本（M1a）
@@ -274,6 +318,9 @@ node packages/extension/test/curriculum-smoke.mjs
 # 2d) M2b 打扰预算/快照容错/曝光队列/侧栏 DOM 桩/通知 picker
 node packages/extension/test/m2b-smoke.mjs
 
+# 2e) M2c 环境表面：黑名单/随机冷却/胶囊/评论与推荐注入/SPA 重挂/站内跳转/无冒充
+node packages/extension/test/m2c-smoke.mjs
+
 # 3) 真实 MV3 环境 E2E：自动启动 headless Edge/Chrome 并 --load-extension
 #    内置本地 stub provider，不需要真实 API Key
 node packages/extension/test/extension-e2e.mjs
@@ -305,6 +352,17 @@ daily-limit / busy / attempted / 次日恢复 / 坏 storage 值），以及诊�
 安静时段/空快照时不渲染不入队」、以及通知链路「默认关闭 → 开 → 选最高分 → 消耗预算 →
 点击 engaged → 用户关闭 skipped、程序化关闭不算 skip」。
 
+`m2c-smoke.mjs`：在 Node 里加载**同一份** `shared/billboard.js` / `content/ambient.js`
+（vm + 迷你 DOM 桩 + 假 chrome.storage），覆盖：敏感站点黑名单（邮箱/银行/支付/结账/
+localhost admin/非 http/页面级 `data-lattice-optout`）、视频 50% vs 其它 25% 的随机出现、
+20 分钟同标签页冷却、预算/安静时段/总开关/每站屏蔽、胶囊→300px 面板→30 秒自动收起→Esc、
+窄屏只有胶囊、环境表面不修改 `<body>` 布局、bilibili/YouTube 评论区+推荐位各注入 1 条、
+marker+WeakSet 去重、SPA 容器替换后旧节点清理并重新挂载、不重排原有内容、
+**无冒充断言**（卡片必带 Lattice 标识，且无用户名/头像/点赞/时间/楼层结构）、
+「换一条」换命题并再记 shown、「收起」不再注入、「感兴趣」记 engaged 并生成正确的
+bilibili/YouTube 搜索 URL（编码）、非视频页打开聚焦该命题的新标签页、以及
+「此站不再显示」持久化并立即移除所有表面。
+
 `extension-e2e.mjs`：从 background service worker 找到扩展 id，打开新标签页，断言**首次运行
 自动 seed** 的 toast、`共 14 命题` 与「今日推送」里的内置领域内容（此时**没有配置模型**）→
 在设置里声明「数学」→ 推送下方出现「点 ⚙ 配置模型后…」提示、诊断出现 `兴趣:` / `待生成:` →
@@ -315,11 +373,15 @@ daily-limit / busy / attempted / 次日恢复 / 坏 storage 值），以及诊�
 再次捕获命中 coverage、`知道了 / 不感兴趣 / 考考我`、诊断的 `推送:` / `兴趣:` / `待生成:` /
 `模型:` / `图谱:` 行、每日剂量持久化、刷新后 seed 不重复执行且当天已展示内容不重复推送、
 「今天的知识看完了 ✓」空状态、第二个标签页、以及无 console 错误 / CSP 违规。
-M2b 额外用 `--host-resolver-rules=MAP www.bilibili.com 127.0.0.1` + `--no-proxy-server`
-把本地 stub 页伪装成真实的 `http://www.bilibili.com:<port>/fake-bilibili`，让 manifest
-里声明式侧栏 content script **真的在 bilibili 源上运行**：断言侧栏渲染 2 条（含难度星级）、
-「知道了」推进并排队 engaged、「不感兴趣」排队 skipped，刷新新标签页后队列被 drain 进
-事件日志（诊断 `参与 3 · 跳过 2`、`待入库曝光 0 条`），并验证打扰设置持久化、通知默认关闭。
+M2b/M2c 额外用 `--host-resolver-rules=MAP www.bilibili.com 127.0.0.1` + `--no-proxy-server`
+把本地 stub 页伪装成真实的 `http://www.bilibili.com:<port>/fake-bilibili`（页面里带真实的
+评论区/推荐位容器），并设置 `latticeForceAmbient=true`：断言侧栏 2 条（含难度星级）、
+评论区与推荐位各注入 1 条且都带 Lattice 标识、卡片无伪造评论结构；评论区「感兴趣」
+打开 `search.bilibili.com/all?keyword=…` 新标签页；随后点侧栏「知道了/不感兴趣」，
+刷新新标签页后所有队列被 drain 进事件日志（诊断 `参与 4 · 跳过 2`、`打扰 … 今日已用 1`、
+`环境:` 行），再在普通 localhost 页面断言环境胶囊展开/收起（Esc）不改变
+`document.body.scrollWidth`、不修改 body 子节点/内联样式，「感兴趣」打开
+`newtab.html?focus=…`，「此站不再显示」持久化到 `latticeAmbientOptOut` 并移除胶囊。
 （找不到浏览器时可用 `CHROME_PATH` 指定，或跳过此测试。）
 
 ## 已知边界（M1/M2a/M2b/M2c）
@@ -357,12 +419,18 @@ M2b 额外用 `--host-resolver-rules=MAP www.bilibili.com 127.0.0.1` + `--no-pro
 
 - 无跨设备同步、无账号；导入 JSONL 是唯一的合并方式。
 - 测验是「自己先想 → 揭晓 → 自评对错」，因为 M0 命题包格式里没有选项/解析字段。
-- 推送层（M2a/M2b）不把曝光当成学习证据：曝光只进 C 账，掌握/调度永远只由作答/评级改变。
+- 推送层（M2a/M2b/M2c）不把曝光当成学习证据：曝光只进 C 账，掌握/调度永远只由作答/评级改变。
 
-## M2b 不做（明确边界）
+## M2b/M2c 不做（明确边界）
 
-- 不做"页内角标 / 桌面浮层 / 通知中心"等更多表面；侧栏只做视频站。
+- 不做"桌面浮层 / 通知中心"等更多表面；环境胶囊之外没有页内角标。
 - 不做个性化打断成本模型（当前页面类型/时段/最近打断次数）；预算只是每日固定次数。
 - 不做反事实留白与延迟测验（设计文档 §9.2 的下一步）。
 - 不做侧栏内答题：侧栏只有 知道了 / 不感兴趣 / 打开 Lattice；验证仍在「考考我」里。
+- 评论区/推荐位注入只做 bilibili / YouTube 的**保守选择器**；平台改版会让选择器失效
+  （失效时只是不注入，不会破坏页面）。只在列表容器之后/末尾插入，**不进入别人的评论线程**。
+- 不做"随机留白/反事实"：环境表面的 25%/50% 是产品化的频率控制，不是实验设计。
+- 不做多语言/多平台适配；其它视频站目前只有环境胶囊。
+- 「感兴趣」跳站内搜索会打开新标签页（不导航当前页），可能被浏览器弹窗策略拦截；
+  被拦截时不会重试。
 

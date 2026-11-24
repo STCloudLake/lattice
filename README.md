@@ -2,7 +2,7 @@
 
 **An inspectable learner model for ambient learning.** Local-first, open source (Apache-2.0), no account, no telemetry.
 
-> Status: **M2b** — knowledge arrives like an ad: a small daily dose in the new tab, plus a sidebar on bilibili/YouTube and opt-in notifications, all sharing an interruption budget (0–3/day, quiet hours, per-site toggles). Every knowledge point carries a two-axis grade (★1–5 difficulty + cognitive operation) so content is paced to the learner's declared level; exposure is tracked in the context ledger and never inflates mastery. Next: held-back counterfactuals and delayed quizzes (measured push lift). See [docs/m2-feed.md](docs/m2-feed.md), [docs/difficulty.md](docs/difficulty.md), [docs/m0-report.md](docs/m0-report.md).
+> Status: **M2c** — knowledge shows up like an ad on **any page**: a small attributed pill/panel bottom-right, plus sidebar and comment/recommendation cards on bilibili/YouTube (visually native but always labelled `Lattice` — no fake users), and 感兴趣 jumps to a same-platform search. Everything shares an interruption budget and a per-site opt-out. Items carry ★1–5 difficulty + cognitive grade so pacing follows the learner's declared level. Next: measured push lift (held-back counterfactual + delayed quizzes). See [docs/m2-feed.md](docs/m2-feed.md), [docs/difficulty.md](docs/difficulty.md), [ETHICS.md](ETHICS.md).
 
 Lattice keeps four separate ledgers about a learner and never mixes them:
 

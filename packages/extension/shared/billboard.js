@@ -27,6 +27,10 @@
     exposureQueue: 'latticePendingExposures',
     shownGuard: 'latticeExposureGuard',
     notifyDay: 'latticeNotifyDay',
+    // M2c ambient surfaces
+    ambientOptOut: 'latticeAmbientOptOut',
+    /** Test override: `true` makes the ambient surface always appear (E2E). */
+    forceAmbient: 'latticeForceAmbient',
   };
 
   /** Defaults per docs/m2-feed.md §9.3: conservative (fewer interruptions). */
@@ -36,6 +40,12 @@
     quietEnd: '08:00',
     sidebar: true,
     notifications: false,
+    // M2c: any-page ambient surfaces are ON by default (unobtrusive pill only),
+    // inline comment/recommendation cards are ON on video sites, and "感兴趣"
+    // jumps to the platform's own search. All three are user-switchable.
+    ambient: true,
+    injectComments: true,
+    searchJump: true,
     sites: { bilibili: true, youtube: true },
   };
 
@@ -50,6 +60,31 @@
   /** The sidebar shows at most 2 cards (one billboard, not a page). */
   const MAX_SIDEBAR_ITEMS = 2;
   const MAX_QUEUE = 200;
+
+  // -------------------------------------------------------------------------
+  // M2c ambient surfaces: blocklist, random appearance, per-site opt-out and
+  // same-platform search. All pure/data-only so they are testable in Node.
+  // -------------------------------------------------------------------------
+
+  /** One ambient pill per tab at most once every 20 minutes. */
+  const AMBIENT_COOLDOWN_MS = 20 * 60 * 1000;
+  /** sessionStorage key for the per-tab cooldown (survives in-tab SPA navigation). */
+  const AMBIENT_COOLDOWN_KEY = 'latticeAmbientShownAt';
+  /** Ambient appearance probability: video sites ~50%, every other page ~25%. */
+  const AMBIENT_CHANCE_VIDEO = 0.5;
+  const AMBIENT_CHANCE_DEFAULT = 0.25;
+  /**
+   * Hard blocklist: sensitive hosts/paths where Lattice renders nothing at all.
+   * Webmail, any *.bank* host, payment providers, checkout/payment paths and
+   * local admin pages are excluded per ETHICS/docs. A generic localhost page is
+   * allowed (local dev pages are not "localhost admin").
+   */
+  const BLOCKED_HOST_PATTERNS = [
+    /^mail\./i,
+    /(^|\.)[^.]*bank[^.]*\./i,
+    /(^|\.)(paypal|stripe|alipay|wise|coinbase|revolut|checkout)\./i,
+  ];
+  const SENSITIVE_PATH = /(?:^|\/)(?:checkout|payment|pay|billing|purchase|cart|wallet|admin|login|signin|wp-admin|dashboard)(?:\/|$|\?)/i;
 
   // -------------------------------------------------------------------------
   // Small pure helpers
@@ -122,6 +157,10 @@
       // Sidebar defaults ON; notifications default OFF.
       sidebar: raw.sidebar !== false,
       notifications: raw.notifications === true,
+      // M2c surfaces default ON; all three can be switched off independently.
+      ambient: raw.ambient !== false,
+      injectComments: raw.injectComments !== false,
+      searchJump: raw.searchJump !== false,
       sites: {
         bilibili: rawSites.bilibili !== false,
         youtube: rawSites.youtube !== false,
@@ -164,6 +203,22 @@
     }
   }
 
+  /**
+   * chrome.storage.local has no atomic read-modify-write. The sidebar and the
+   * ambient script share one isolated world, so serializing their mutations on a
+   * single promise chain stops them from losing each other's updates (a burst of
+   * queueExposure/markShown/claimInterrupt calls at page load).
+   */
+  function runSerialized(task) {
+    const previous = root.__latticeStorageChain || Promise.resolve();
+    const next = previous.then(task, task);
+    root.__latticeStorageChain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+
   // -------------------------------------------------------------------------
   // Billboard snapshot (written by newtab, read by everybody else)
   // -------------------------------------------------------------------------
@@ -201,6 +256,8 @@
     };
     if (typeof raw.cueId === 'string' && raw.cueId) item.cueId = raw.cueId;
     if (typeof raw.domain === 'string' && raw.domain) item.domain = raw.domain;
+    // The point's short name is what "感兴趣 -> 站内搜索" prefers as its query.
+    if (typeof raw.name === 'string' && raw.name.trim()) item.name = raw.name.trim();
     item.reason = REASONS.has(raw.reason) ? raw.reason : 'frontier';
     const tier = normalizeTier(raw.tier);
     if (tier !== undefined) item.tier = tier;
@@ -245,18 +302,20 @@
   }
 
   /** Marks ids as shown today; returns the ids that were not marked before. */
-  async function markShown(area, at, propositionIds) {
-    const today = dayOf(at);
-    const guard = await readShownGuard(area, at);
-    const seen = new Set(guard.ids);
-    const added = [];
-    for (const id of Array.isArray(propositionIds) ? propositionIds : []) {
-      if (typeof id !== 'string' || !id || seen.has(id)) continue;
-      seen.add(id);
-      added.push(id);
-    }
-    if (added.length > 0) await writeKey(area, KEYS.shownGuard, { day: today, ids: [...seen] });
-    return added;
+  function markShown(area, at, propositionIds) {
+    return runSerialized(async () => {
+      const today = dayOf(at);
+      const guard = await readShownGuard(area, at);
+      const seen = new Set(guard.ids);
+      const added = [];
+      for (const id of Array.isArray(propositionIds) ? propositionIds : []) {
+        if (typeof id !== 'string' || !id || seen.has(id)) continue;
+        seen.add(id);
+        added.push(id);
+      }
+      if (added.length > 0) await writeKey(area, KEYS.shownGuard, { day: today, ids: [...seen] });
+      return added;
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -282,31 +341,35 @@
     return { today, settings, state, budget: budgetStatus(settings, state, at) };
   }
 
-  /** Atomically-ish claims one interruption credit; false/none when not allowed. */
-  async function claimInterrupt(area, at) {
-    const context = await readInterruptContext(area, at);
-    if (!context.budget.allowed) {
-      return { ok: false, reason: context.budget.reason, used: context.state.used, limit: context.settings.dailyLimit };
-    }
-    const next = { day: context.today, used: context.state.used + 1 };
-    const saved = await writeKey(area, KEYS.interruptState, next);
-    if (!saved) return { ok: false, reason: 'storage', used: context.state.used, limit: context.settings.dailyLimit };
-    return {
-      ok: true,
-      used: next.used,
-      limit: context.settings.dailyLimit,
-      remaining: Math.max(0, context.settings.dailyLimit - next.used),
-    };
+  /** Claims one interruption credit; serialized so two surfaces cannot over-claim. */
+  function claimInterrupt(area, at) {
+    return runSerialized(async () => {
+      const context = await readInterruptContext(area, at);
+      if (!context.budget.allowed) {
+        return { ok: false, reason: context.budget.reason, used: context.state.used, limit: context.settings.dailyLimit };
+      }
+      const next = { day: context.today, used: context.state.used + 1 };
+      const saved = await writeKey(area, KEYS.interruptState, next);
+      if (!saved) return { ok: false, reason: 'storage', used: context.state.used, limit: context.settings.dailyLimit };
+      return {
+        ok: true,
+        used: next.used,
+        limit: context.settings.dailyLimit,
+        remaining: Math.max(0, context.settings.dailyLimit - next.used),
+      };
+    });
   }
 
   /** Gives one credit back (used when notification creation fails). */
-  async function releaseInterrupt(area, at) {
-    const today = dayOf(at);
-    const state = normalizeInterruptState(await readKey(area, KEYS.interruptState, null), today);
-    if (state.used <= 0) return state;
-    const next = { day: today, used: state.used - 1 };
-    await writeKey(area, KEYS.interruptState, next);
-    return next;
+  function releaseInterrupt(area, at) {
+    return runSerialized(async () => {
+      const today = dayOf(at);
+      const state = normalizeInterruptState(await readKey(area, KEYS.interruptState, null), today);
+      if (state.used <= 0) return state;
+      const next = { day: today, used: state.used - 1 };
+      await writeKey(area, KEYS.interruptState, next);
+      return next;
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -347,22 +410,39 @@
    * Appends one exposure record. De-duplicated by id and by
    * (propositionId, kind, day, surface), so a double render cannot double-log.
    */
-  async function queueExposure(area, exposure) {
+  function queueExposure(area, exposure) {
     const entry = normalizeExposure(exposure);
-    if (!entry) return null;
-    const queue = await readExposureQueue(area);
-    const duplicate = queue.some(
-      (item) =>
-        item.id === entry.id ||
-        (item.propositionId === entry.propositionId &&
-          item.kind === entry.kind &&
-          item.day === entry.day &&
-          item.surface === entry.surface),
-    );
-    if (duplicate) return entry;
-    queue.push(entry);
-    await writeKey(area, KEYS.exposureQueue, queue.slice(-MAX_QUEUE));
-    return entry;
+    if (!entry) return Promise.resolve(null);
+    return runSerialized(async () => {
+      const queue = await readExposureQueue(area);
+      const duplicate = queue.some(
+        (item) =>
+          item.id === entry.id ||
+          (item.propositionId === entry.propositionId &&
+            item.kind === entry.kind &&
+            item.day === entry.day &&
+            item.surface === entry.surface),
+      );
+      if (duplicate) return entry;
+      queue.push(entry);
+      await writeKey(area, KEYS.exposureQueue, queue.slice(-MAX_QUEUE));
+      return entry;
+    });
+  }
+
+  /** Per-page reservation shared by sidebar.js + ambient.js (same isolated world). */
+  function pageReservedSet(root) {
+    if (!root || typeof root !== 'object') return new Set();
+    if (!root.__latticeReservedIds) root.__latticeReservedIds = new Set();
+    return root.__latticeReservedIds;
+  }
+
+  function reservePageIds(root, propositionIds) {
+    const reserved = pageReservedSet(root);
+    for (const id of Array.isArray(propositionIds) ? propositionIds : []) {
+      if (typeof id === 'string' && id) reserved.add(id);
+    }
+    return reserved;
   }
 
   // -------------------------------------------------------------------------
@@ -376,14 +456,147 @@
     return null;
   }
 
-  function pickSidebarItems(board, guard, settings, siteKey, at, limit) {
+  // -------------------------------------------------------------------------
+  // M2c: where may Lattice render, and when
+  // -------------------------------------------------------------------------
+
+  function isVideoHost(hostname) {
+    return siteKeyFor(hostname) !== null;
+  }
+
+  /** Sensitive hostnames that must never receive any injected content. */
+  function isBlockedHost(hostname) {
+    const host = String(hostname || '').toLowerCase();
+    if (!host) return true;
+    return BLOCKED_HOST_PATTERNS.some((pattern) => pattern.test(host));
+  }
+
+  /** Payment/checkout/admin paths are blocked on every host (incl. localhost). */
+  function isSensitivePath(pathname) {
+    return SENSITIVE_PATH.test(String(pathname || ''));
+  }
+
+  /**
+   * Full page gate. `page` is `{protocol, hostname, pathname}`; anything that is
+   * not a plain http(s) page is rejected (chrome-extension, file, about).
+   */
+  function isBlockedPage(page) {
+    if (!page || typeof page !== 'object') return true;
+    const protocol = String(page.protocol || 'https:').toLowerCase();
+    if (protocol !== 'http:' && protocol !== 'https:') return true;
+    const hostname = String(page.hostname || '').toLowerCase();
+    if (!hostname) return true;
+    if (isBlockedHost(hostname)) return true;
+    if (isSensitivePath(page.pathname)) return true;
+    return false;
+  }
+
+  /** "此站不再显示": exact hostname or any subdomain of a stored entry. */
+  function isHostOptedOut(hostname, optOutList) {
+    const host = String(hostname || '').toLowerCase();
+    if (!host) return true;
+    const list = Array.isArray(optOutList) ? optOutList : [];
+    return list.some((entry) => {
+      const value = String(entry || '').toLowerCase().replace(/^\./, '');
+      if (!value) return false;
+      return host === value || host.endsWith('.' + value);
+    });
+  }
+
+  async function readAmbientOptOut(area) {
+    const raw = await readKey(area, KEYS.ambientOptOut, []);
+    if (!Array.isArray(raw)) return [];
+    return [...new Set(raw.filter((entry) => typeof entry === 'string' && entry.trim()).map((entry) => entry.trim()))];
+  }
+
+  /** Persists "此站不再显示" for one hostname; returns the new list. */
+  async function addAmbientOptOut(area, hostname) {
+    const host = String(hostname || '').trim().toLowerCase();
+    if (!host) return [];
+    const list = await readAmbientOptOut(area);
+    if (!isHostOptedOut(host, list)) list.push(host);
+    await writeKey(area, KEYS.ambientOptOut, list);
+    return list;
+  }
+
+  function ambientChance(hostname) {
+    return isVideoHost(hostname) ? AMBIENT_CHANCE_VIDEO : AMBIENT_CHANCE_DEFAULT;
+  }
+
+  /** Ad-like random appearance; `force` is the E2E/test override. */
+  function shouldShowAmbient(options = {}) {
+    if (options.force === true) return true;
+    const random = typeof options.random === 'function' ? Number(options.random()) : Math.random();
+    return random < ambientChance(options.hostname);
+  }
+
+  /** Per-tab cooldown helpers (sessionStorage-like `{getItem, setItem}`). */
+  function ambientCoolingDown(session, now, cooldownMs) {
+    try {
+      if (!session || typeof session.getItem !== 'function') return false;
+      const last = Number(session.getItem(AMBIENT_COOLDOWN_KEY));
+      if (!Number.isFinite(last) || last <= 0) return false;
+      const elapsed = toDate(now).getTime() - last;
+      return elapsed >= 0 && elapsed < (Number(cooldownMs) || AMBIENT_COOLDOWN_MS);
+    } catch {
+      return false;
+    }
+  }
+
+  function markAmbientShown(session, now) {
+    try {
+      if (!session || typeof session.setItem !== 'function') return false;
+      session.setItem(AMBIENT_COOLDOWN_KEY, String(toDate(now).getTime()));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // M2c: "感兴趣" -> same-platform search
+  // -------------------------------------------------------------------------
+
+  /** Prefer the point's short name; otherwise first ~24 chars + domain. */
+  function buildSearchQuery(item) {
+    const name = item && typeof item.name === 'string' ? item.name.trim() : '';
+    if (name) return name;
+    const statement = String((item && item.statement) || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const short = statement.slice(0, 24);
+    const domain = item && typeof item.domain === 'string' ? item.domain.trim() : '';
+    return [short, domain].filter(Boolean).join(' ');
+  }
+
+  function searchUrl(platform, query) {
+    const text = String(query || '').trim();
+    if (!text) return '';
+    if (platform === 'bilibili') return `https://search.bilibili.com/all?keyword=${encodeURIComponent(text)}`;
+    if (platform === 'youtube') return `https://www.youtube.com/results?search_query=${encodeURIComponent(text)}`;
+    return '';
+  }
+
+  /** Next snapshot item that is neither used on this page nor shown today. */
+  function pickNextSnapshotItem(board, guard, usedIds, at) {
+    const used = usedIds && typeof usedIds.has === 'function' ? usedIds : new Set(Array.isArray(usedIds) ? usedIds : []);
+    const seen = shownIds(guard, at);
+    return (
+      snapshotItems(board, at).find(
+        (item) => !used.has(item.propositionId) && !seen.has(item.propositionId),
+      ) || null
+    );
+  }
+
+  function pickSidebarItems(board, guard, settings, siteKey, at, limit, excludeIds) {
     if (!boardIsToday(board, at)) return [];
     if (!settings || settings.sidebar === false) return [];
     if (siteKey && settings.sites && settings.sites[siteKey] === false) return [];
     const seen = shownIds(guard, at);
+    const excluded = excludeIds && typeof excludeIds.has === 'function' ? excludeIds : new Set();
     const max = Math.max(0, Math.min(MAX_SIDEBAR_ITEMS, Number(limit) || MAX_SIDEBAR_ITEMS));
     return snapshotItems(board, at)
-      .filter((item) => !seen.has(item.propositionId))
+      .filter((item) => !seen.has(item.propositionId) && !excluded.has(item.propositionId))
       .slice(0, max);
   }
 
@@ -436,6 +649,10 @@
     DEFAULT_INTERRUPT_SETTINGS,
     COGNITIVE_LABELS,
     MAX_SIDEBAR_ITEMS,
+    AMBIENT_COOLDOWN_MS,
+    AMBIENT_COOLDOWN_KEY,
+    AMBIENT_CHANCE_VIDEO,
+    AMBIENT_CHANCE_DEFAULT,
     // time / settings
     toDate,
     dayOf,
@@ -447,6 +664,7 @@
     // storage
     readKey,
     writeKey,
+    runSerialized,
     // snapshot
     masteryMean,
     normalizeSnapshotItem,
@@ -470,8 +688,25 @@
     queueExposure,
     // selection
     siteKeyFor,
+    isVideoHost,
+    pageReservedSet,
+    reservePageIds,
     pickSidebarItems,
+    pickNextSnapshotItem,
     pickNotificationItem,
+    // ambient surfaces (M2c)
+    isBlockedHost,
+    isSensitivePath,
+    isBlockedPage,
+    isHostOptedOut,
+    readAmbientOptOut,
+    addAmbientOptOut,
+    ambientChance,
+    shouldShowAmbient,
+    ambientCoolingDown,
+    markAmbientShown,
+    buildSearchQuery,
+    searchUrl,
     // difficulty
     tierStars,
     cognitiveLabel,
