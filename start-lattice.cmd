@@ -1,34 +1,34 @@
 @echo off
 setlocal
-chcp 65001 >nul
 
-rem Launch Edge with a dedicated, persistent Lattice profile and the unpacked
-rem extension. Unpacked MV3 extensions cannot be installed silently into a normal
-rem browser profile (the browser requires the user to pick the folder once), so
-rem this launcher is the reproducible way to get a working install:
-rem   - its own profile  -> your daily browsing stays untouched
-rem   - --load-extension -> the extension is present every time you start it
-rem   - the profile keeps the learner database (OPFS) between runs
+rem Launch Edge with Lattice's dedicated profile.
+rem
+rem IMPORTANT: this script does NOT pass --load-extension. Chrome/Edge 137+
+rem removed that flag on branded builds: an extension loaded from the command
+rem line gets DISABLE_UNSUPPORTED_DEVELOPER_EXTENSION on the next start. The
+rem supported path is a one-time manual install in developer mode:
+rem
+rem   edge://extensions  ->  developer mode ON  ->  Load unpacked
+rem                      ->  pick packages\extension
+rem
+rem After that it stays installed in this profile and survives restarts.
+rem
+rem Keep this file ASCII-only: cmd.exe parses .cmd files in the OEM code page,
+rem and UTF-8 Chinese text can corrupt the parser on a GBK system.
 
 set "ROOT=%~dp0"
-set "EXT=%ROOT%packages\extension"
+set "EDGE=%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"
+if exist "%EDGE%" goto :run
+set "EDGE=%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"
+if exist "%EDGE%" goto :run
+goto :noedge
 
-if not exist "%EXT%\manifest.json" (
-  echo [Lattice] 找不到扩展构建产物：%EXT%
-  echo 请先在仓库目录运行：  npm install ^&^& npm run build
-  pause
-  exit /b 1
-)
-
-set "EDGE=C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-if not exist "%EDGE%" set "EDGE=%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"
-if not exist "%EDGE%" set "EDGE=%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"
-if not exist "%EDGE%" (
-  echo [Lattice] 没找到 Microsoft Edge。
-  echo 请用记事本打开本文件，把 EDGE 改成你的浏览器路径后重试。
-  pause
-  exit /b 1
-)
-
-start "" "%EDGE%" --user-data-dir="%ROOT%.browser-profile" --load-extension="%EXT%" --no-first-run --no-default-browser-check --new-window
+:run
+start "" "%EDGE%" --user-data-dir="%ROOT%.browser-profile" --no-first-run --no-default-browser-check --new-window
 exit /b 0
+
+:noedge
+echo [Lattice] Microsoft Edge not found.
+echo Open this file in Notepad and set EDGE to your browser path.
+pause
+exit /b 1
