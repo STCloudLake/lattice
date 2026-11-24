@@ -3,6 +3,7 @@ import { applyEvidence, emptyMastery, resetMastery } from './mastery.js';
 import type {
   Chain,
   Cue,
+  DomainLevel,
   ExposureState,
   Interest,
   CueKind,
@@ -171,8 +172,54 @@ function applyEvent(state: LearnerState, e: LatticeEvent): void {
             captureCount: 1,
             lastSeenAt: e.occurredAt,
             topics: {},
+            declared: false,
+            level: 'beginner',
           };
       for (const topic of topics) next.topics[topic] = (next.topics[topic] ?? 0) + 1;
+      state.interests[id] = next;
+      return;
+    }
+
+    case 'interest.removed': {
+      const name = asString(e.payload['domain']);
+      const id = e.subjectId ?? (name ? 'dom_' + name.toLowerCase() : undefined);
+      if (!id) return;
+      const existing = state.interests[id];
+      if (!existing) return;
+      // Captures remain evidence; only the explicit declaration is withdrawn.
+      if (existing.captureCount === 0) delete state.interests[id];
+      else state.interests[id] = { ...existing, declared: false };
+      return;
+    }
+
+    case 'interest.declared': {
+      const name = asString(e.payload['domain']);
+      const id = e.subjectId ?? (name ? 'dom_' + name.toLowerCase() : undefined);
+      if (!name || !id) return;
+      const levelRaw = e.payload['level'];
+      const level = levelRaw === 'intermediate' || levelRaw === 'advanced' ? levelRaw : 'beginner';
+      const weightRaw = e.payload['weight'];
+      const weight = typeof weightRaw === 'number' && weightRaw > 0 ? weightRaw : 5;
+      const existing = state.interests[id];
+      const next: Interest = existing
+        ? {
+            ...existing,
+            declared: true,
+            level,
+            weight: Math.max(existing.weight, weight),
+            lastSeenAt: e.occurredAt,
+            topics: { ...existing.topics },
+          }
+        : {
+            id,
+            name,
+            weight,
+            captureCount: 0,
+            lastSeenAt: e.occurredAt,
+            topics: {},
+            declared: true,
+            level,
+          };
       state.interests[id] = next;
       return;
     }

@@ -2,7 +2,7 @@ import { isDue, retrievability } from './fsrs.js';
 import { masteryOf } from './mastery.js';
 import { pickCue } from './queue.js';
 import { activePropositions, exposureOf, transitivePrerequisites } from './replay.js';
-import type { Id, ISODate, LearnerState } from './types.js';
+import type { DomainLevel, Id, ISODate, LearnerState } from './types.js';
 
 /**
  * The push policy: what to show in the newtab feed today.
@@ -38,6 +38,69 @@ export interface FeedOptions {
   includeReviews?: boolean;
 }
 
+export interface CurriculumNeed {
+  domain: string;
+  level: DomainLevel;
+  /** Propositions we already have in this domain. */
+  existing: number;
+}
+
+/** Average mastery of a domain's propositions (0 when it has none). */
+export function domainMastery(state: LearnerState, domain: string): number {
+  const target = domain.trim().toLowerCase();
+  let sum = 0;
+  let count = 0;
+  for (const proposition of Object.values(state.propositions)) {
+    if (proposition.status !== 'active') continue;
+    if ((proposition.domain ?? '').trim().toLowerCase() !== target) continue;
+    sum += masteryOf(state.mastery[proposition.id]);
+    count += 1;
+  }
+  return count === 0 ? 0 : sum / count;
+}
+
+/**
+ * Which curriculum level to generate next for a declared domain.
+ * Starts at the requested level and steps up only when the domain is understood.
+ */
+export function curriculumLevelFor(state: LearnerState, domain: string): DomainLevel {
+  const target = domain.trim().toLowerCase();
+  const declared = Object.values(state.interests).find((i) => i.name.trim().toLowerCase() === target);
+  const start: DomainLevel = declared?.level ?? 'beginner';
+  const avg = domainMastery(state, domain);
+  if (start === 'beginner' && avg >= 0.55) return 'intermediate';
+  if (start === 'intermediate' && avg >= 0.8) return 'advanced';
+  return start;
+}
+
+/**
+ * Declared domains that still need content. The extension uses this to decide
+ * when to call the model and generate the next batch instead of waiting for the
+ * user to capture something.
+ */
+export function curriculumNeeds(
+  state: LearnerState,
+  options: { minPropositions?: number } = {},
+): CurriculumNeed[] {
+  const minPropositions = options.minPropositions ?? 6;
+  const counts = new Map<string, number>();
+  for (const proposition of Object.values(state.propositions)) {
+    if (proposition.status !== 'active' || !proposition.domain) continue;
+    const key = proposition.domain.trim().toLowerCase();
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const needs: CurriculumNeed[] = [];
+  for (const interest of Object.values(state.interests)) {
+    if (!interest.declared) continue;
+    const key = interest.name.trim().toLowerCase();
+    const existing = counts.get(key) ?? 0;
+    if (existing >= minPropositions) continue;
+    needs.push({ domain: interest.name, level: curriculumLevelFor(state, interest.name), existing });
+  }
+  needs.sort((a, b) => (a.existing === b.existing ? (a.domain < b.domain ? -1 : 1) : a.existing - b.existing));
+  return needs;
+}
+
 export function dayOf(iso: ISODate): string {
   return iso.slice(0, 10);
 }
@@ -47,11 +110,17 @@ function interestBoost(state: LearnerState, domain: string | undefined): number 
   const target = domain.trim().toLowerCase();
   if (target.length === 0) return 1;
   let weight = 0;
+  let declared = false;
   for (const interest of Object.values(state.interests)) {
-    if (interest.name.trim().toLowerCase() === target) weight = Math.max(weight, interest.weight);
+    if (interest.name.trim().toLowerCase() === target) {
+      weight = Math.max(weight, interest.weight);
+      declared = declared || interest.declared;
+    }
   }
   // Captures are interest evidence; they bias the ordering, never the mastery.
-  return 1 + Math.min(weight, 10) * 0.15;
+  // An explicitly declared domain outranks one merely inferred from captures.
+  const base = 1 + Math.min(weight, 10) * 0.15;
+  return declared ? base * 1.4 : base;
 }
 
 function chainCentrality(state: LearnerState): Map<Id, number> {

@@ -1,6 +1,6 @@
 import type { CueKind, Id, ISODate, LatticeEvent } from './types.js';
 import { dedupeAndSort } from './replay.js';
-import { assertCue, assertProposition, validateEvent, type EventFactory } from './events.js';
+import { assertChain, assertCue, assertProposition, validateEvent, type EventFactory } from './events.js';
 
 /** Stable, diff-friendly export: deduped, ordered, one JSON object per line. */
 export function exportJsonl(events: readonly LatticeEvent[]): string {
@@ -50,6 +50,8 @@ export interface PropositionPackCue {
 }
 
 export interface PropositionPackEntry {
+  /** Optional stable reference used by `chains`. Defaults to its index. */
+  ref?: string;
   statement: string;
   name?: string;
   aliases?: string[];
@@ -57,9 +59,17 @@ export interface PropositionPackEntry {
   cues: PropositionPackCue[];
 }
 
+export interface PropositionPackChain {
+  premises: string[];
+  conclusion: string;
+  strength?: number;
+}
+
 export interface PropositionPack {
   format: 1;
   propositions: PropositionPackEntry[];
+  /** Optional prerequisite structure; refs point at entry `ref` (or index). */
+  chains?: PropositionPackChain[];
 }
 
 export function parsePropositionPack(text: string): { pack?: PropositionPack; errors: string[] } {
@@ -108,14 +118,47 @@ export function parsePropositionPack(text: string): { pack?: PropositionPack; er
     });
 
     const entryOut: PropositionPackEntry = { statement, cues };
+    if (typeof e['ref'] === 'string' && e['ref'].trim().length > 0) entryOut.ref = e['ref'].trim();
     if (typeof e['name'] === 'string') entryOut.name = e['name'];
     if (Array.isArray(e['aliases'])) entryOut.aliases = e['aliases'].filter((x): x is string => typeof x === 'string');
     if (typeof e['domain'] === 'string') entryOut.domain = e['domain'];
     propositions.push(entryOut);
   });
 
+  const knownRefs = new Set(propositions.map((entry, index) => entry.ref ?? `#${index + 1}`));
+  const rawChains = obj['chains'];
+  const chains: PropositionPackChain[] = [];
+  if (rawChains !== undefined) {
+    if (!Array.isArray(rawChains)) {
+      errors.push('chains 必须是数组');
+    } else {
+      rawChains.forEach((item, i) => {
+        const at = `chains[${i}]`;
+        if (typeof item !== 'object' || item === null) {
+          errors.push(`${at}: 不是对象`);
+          return;
+        }
+        const c = item as Record<string, unknown>;
+        const premises = Array.isArray(c['premises'])
+          ? c['premises'].filter((x): x is string => typeof x === 'string')
+          : [];
+        const conclusion = typeof c['conclusion'] === 'string' ? c['conclusion'] : '';
+        if (premises.length === 0) errors.push(`${at}.premises 不能为空`);
+        if (!conclusion) errors.push(`${at}.conclusion 不能为空`);
+        for (const ref of [...premises, conclusion]) {
+          if (ref && !knownRefs.has(ref)) errors.push(`${at}: 引用了未知命题 ref "${ref}"`);
+        }
+        const chain: PropositionPackChain = { premises, conclusion };
+        if (typeof c['strength'] === 'number') chain.strength = c['strength'];
+        chains.push(chain);
+      });
+    }
+  }
+
   if (errors.length > 0) return { errors };
-  return { pack: { format: 1, propositions }, errors: [] };
+  const pack: PropositionPack = { format: 1, propositions };
+  if (chains.length > 0) pack.chains = chains;
+  return { pack, errors: [] };
 }
 
 export function packToEvents(
@@ -126,10 +169,12 @@ export function packToEvents(
 ): { events: LatticeEvent[]; propositionIds: Id[] } {
   const events: LatticeEvent[] = [];
   const propositionIds: Id[] = [];
-  for (const entry of pack.propositions) {
+  const idsByRef = new Map<string, Id>();
+  pack.propositions.forEach((entry, index) => {
     const { propositionId, event } = assertProposition(factory, newId, entry, opts);
     events.push(event);
     propositionIds.push(propositionId);
+    idsByRef.set(entry.ref ?? `#${index + 1}`, propositionId);
     for (const cue of entry.cues) {
       const { event: cueEvent } = assertCue(
         factory,
@@ -139,6 +184,22 @@ export function packToEvents(
       );
       events.push(cueEvent);
     }
+  });
+  for (const chain of pack.chains ?? []) {
+    const premiseIds = chain.premises.map((ref) => idsByRef.get(ref));
+    const conclusionId = idsByRef.get(chain.conclusion);
+    if (!conclusionId || premiseIds.some((id) => !id)) continue;
+    const { event } = assertChain(
+      factory,
+      newId,
+      {
+        premiseIds: premiseIds as Id[],
+        conclusionId,
+        ...(chain.strength !== undefined ? { strength: chain.strength } : {}),
+      },
+      opts,
+    );
+    events.push(event);
   }
   return { events, propositionIds };
 }

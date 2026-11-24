@@ -12,6 +12,7 @@ import {
   samplesFromState,
   stateDigest,
   exportJsonl,
+  prerequisiteEdges,
   type LatticeEvent,
 } from '../src/index.js';
 import { testContext } from './helpers.js';
@@ -111,6 +112,36 @@ describe('io', () => {
     const state = replay(events);
     expect(Object.keys(state.propositions)).toHaveLength(2);
     expect(Object.keys(state.cues)).toHaveLength(1);
+  });
+
+  it('imports optional chains from a pack', () => {
+    const packText = JSON.stringify({
+      format: 1,
+      propositions: [
+        { ref: 'a', statement: '前提 A 成立。', cues: [] },
+        { ref: 'b', statement: '前提 B 成立。', cues: [] },
+        { ref: 'c', statement: '结论 C 成立。', cues: [] },
+      ],
+      chains: [{ premises: ['a', 'b'], conclusion: 'c', strength: 0.8 }],
+    });
+    const { pack, errors } = parsePropositionPack(packText);
+    expect(errors).toEqual([]);
+    const ctx = testContext();
+    const { events } = packToEvents(pack!, ctx.factory, ctx.newId);
+    const state = replay(events);
+    expect(Object.keys(state.chains)).toHaveLength(1);
+    expect(prerequisiteEdges(state)).toHaveLength(2);
+  });
+
+  it('refuses a pack chain that points at an unknown ref', () => {
+    const { errors } = parsePropositionPack(
+      JSON.stringify({
+        format: 1,
+        propositions: [{ ref: 'a', statement: '一条命题。', cues: [] }],
+        chains: [{ premises: ['zzz'], conclusion: 'a' }],
+      }),
+    );
+    expect(errors.join(' ')).toContain('未知命题');
   });
 
   it('refuses a pack with an empty statement', () => {

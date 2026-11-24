@@ -1,6 +1,7 @@
 import { fnv1a64 } from './ids.js';
 import type {
   Actor,
+  DomainLevel,
   CueKind,
   EventType,
   Grade,
@@ -189,6 +190,29 @@ export function assertInterest(
   return { interestId, event: factory('interest.observed', interestId, payload, opts) };
 }
 
+/** The user explicitly says "I want to learn this domain at this level". */
+export function declareInterest(
+  factory: EventFactory,
+  input: { domain: string; level?: DomainLevel; weight?: number },
+  opts?: { at?: ISODate; actor?: Actor },
+): { interestId: Id; event: LatticeEvent } {
+  const domain = input.domain.trim();
+  const interestId = 'dom_' + fnv1a64(domain.toLowerCase()).slice(0, 12);
+  const payload: Record<string, unknown> = { domain, level: input.level ?? 'beginner' };
+  if (input.weight !== undefined) payload.weight = input.weight;
+  return { interestId, event: factory('interest.declared', interestId, payload, opts) };
+}
+
+export function removeInterest(
+  factory: EventFactory,
+  input: { domain: string },
+  opts?: { at?: ISODate; actor?: Actor },
+): { interestId: Id; event: LatticeEvent } {
+  const domain = input.domain.trim();
+  const interestId = 'dom_' + fnv1a64(domain.toLowerCase()).slice(0, 12);
+  return { interestId, event: factory('interest.removed', interestId, { domain }, opts) };
+}
+
 export function exposureShown(
   factory: EventFactory,
   input: { propositionId: Id; surface?: string; reason?: string; day?: string },
@@ -230,6 +254,8 @@ const KNOWN_TYPES: ReadonlySet<string> = new Set<EventType>([
   'proposition.merged',
   'chain.asserted',
   'interest.observed',
+  'interest.declared',
+  'interest.removed',
   'cue.asserted',
   'review.rated',
   'quiz.answered',

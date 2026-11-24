@@ -16,6 +16,8 @@ export type EventType =
   | 'proposition.merged'
   | 'chain.asserted'
   | 'interest.observed'
+  | 'interest.declared'
+  | 'interest.removed'
   | 'cue.asserted'
   | 'review.rated'
   | 'quiz.answered'
@@ -145,7 +147,9 @@ export interface MasterySummary {
   strength: number;
 }
 
-/** C ledger: what the learner showed interest in, derived from captures. */
+export type DomainLevel = 'beginner' | 'intermediate' | 'advanced';
+
+/** C ledger: what the learner is interested in. Declared beats inferred. */
 export interface Interest {
   id: Id;
   name: string;
@@ -154,6 +158,10 @@ export interface Interest {
   captureCount: number;
   lastSeenAt: ISODate;
   topics: Record<string, number>;
+  /** True when the user set this domain explicitly (settings / onboarding). */
+  declared: boolean;
+  /** Requested starting level for this domain. */
+  level: DomainLevel;
 }
 
 /** C ledger: exposure bookkeeping. Never evidence of understanding. */

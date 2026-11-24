@@ -7,6 +7,7 @@ import type { ExistingProposition, ExtractedProposition, LlmMessage, NormalizedS
  */
 export const EXTRACT_PROMPT_VERSION = 'extract-v1';
 export const IDENTIFY_PROMPT_VERSION = 'identify-v1';
+export const CURRICULUM_PROMPT_VERSION = 'curriculum-v1';
 
 export const EXTRACT_SYSTEM = `你是知识抽取器。把给定文本拆成「命题」和「推理链」。
 
@@ -78,6 +79,46 @@ export function buildIdentifyMessages(
         JSON.stringify(cand, null, 1) +
         '\n\n已有命题：\n' +
         JSON.stringify(ex, null, 1),
+    },
+  ];
+}
+
+
+export const CURRICULUM_SYSTEM = `你是一个课程设计者。给定领域与学习者水平，设计一小段「最小先修课程」：
+从领域的基础命题开始，按先修顺序组织，只覆盖必要的推理步骤。
+
+规则：
+1. 命题是原子陈述句，彼此不重复，也不重复给定的已有命题。
+2. 推理链表示「若干前提共同推出一个结论」。只有在逻辑上确实成立时才给链。
+3. 不要引入领域外的知识，不要写练习或题目，只给命题与推理链。
+4. 数量控制在要求范围内；先易后难；每个命题都要能被理解，不需要额外背景。
+5. 全部用中文书写。
+
+只输出一个 JSON 对象：
+{
+  "domain": "领域名",
+  "propositions": [{"ref":"p1","statement":"原子陈述句","name":"短标签"}],
+  "chains": [{"premises":["p1","p2"],"conclusion":"p3","strength":0.8}]
+}`;
+
+export function buildCurriculumMessages(input: {
+  domain: string;
+  level: 'beginner' | 'intermediate' | 'advanced';
+  count: number;
+  existingStatements?: string[];
+}): LlmMessage[] {
+  const existing = (input.existingStatements ?? []).slice(0, 30);
+  return [
+    { role: 'system', content: CURRICULUM_SYSTEM },
+    {
+      role: 'user',
+      content:
+        `领域：${input.domain}\n` +
+        `学习者水平：${input.level}\n` +
+        `请生成 ${input.count} 条左右的命题与必要的推理链。\n` +
+        (existing.length > 0
+          ? `已有命题（不要重复）：\n${existing.map((s) => '- ' + s).join('\n')}`
+          : ''),
     },
   ];
 }

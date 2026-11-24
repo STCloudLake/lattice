@@ -3,6 +3,8 @@ import {
   assertChain,
   assertCue,
   assertInterest,
+  curriculumNeeds,
+  declareInterest,
   assertProposition,
   buildFeed,
   createEventFactory,
@@ -128,6 +130,30 @@ describe('buildFeed', () => {
     const feed = buildFeed(replay([...economics.events, ...cooking.events, interest.event]), { now: NOW, dose: 2 });
     expect(feed[0]?.propositionId).toBe(economics.propositionId);
     expect(feed[0]?.domain).toBe('经济学');
+  });
+
+  it('lets an explicitly declared domain outrank an inferred one', () => {
+    const { factory, newId } = ctx();
+    const inferred = prop(factory, newId, '推断兴趣命题', '经济学');
+    const declared = prop(factory, newId, '声明兴趣命题', '人工智能');
+    const observed = assertInterest(factory, { domain: '经济学', weight: 9 }, { at: AT });
+    const declaration = declareInterest(factory, { domain: '人工智能', level: 'beginner' }, { at: AT });
+    const state = replay([...inferred.events, ...declared.events, observed.event, declaration.event]);
+    const feed = buildFeed(state, { now: NOW, dose: 2 });
+    expect(feed[0]?.propositionId).toBe(declared.propositionId);
+  });
+
+  it('reports declared domains that still need content', () => {
+    const { factory, newId } = ctx();
+    const ai = prop(factory, newId, '人工智能命题 1', '人工智能');
+    const declaration = declareInterest(factory, { domain: '人工智能', level: 'beginner' }, { at: AT });
+    const cs = declareInterest(factory, { domain: '计算机', level: 'advanced' }, { at: AT });
+    const state = replay([...ai.events, declaration.event, cs.event]);
+    const needs = curriculumNeeds(state, { minPropositions: 2 });
+    const names = needs.map((need) => need.domain);
+    expect(names).toContain('计算机');
+    expect(names).toContain('人工智能'); // 1 proposition < min 2
+    expect(needs.find((need) => need.domain === '计算机')?.level).toBe('advanced');
   });
 
   it('is deterministic for the same state', () => {

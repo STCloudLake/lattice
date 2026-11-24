@@ -9,7 +9,14 @@ import {
   type Id,
   type LatticeEvent,
 } from '@lattice/core';
-import { buildExtractMessages, buildIdentifyMessages, EXTRACT_PROMPT_VERSION, IDENTIFY_PROMPT_VERSION } from './prompts.js';
+import {
+  buildCurriculumMessages,
+  buildExtractMessages,
+  buildIdentifyMessages,
+  CURRICULUM_PROMPT_VERSION,
+  EXTRACT_PROMPT_VERSION,
+  IDENTIFY_PROMPT_VERSION,
+} from './prompts.js';
 import { extractJsonObject, validateCandidateJson, type ValidationIssue } from './validate.js';
 import {
   chainKey,
@@ -300,4 +307,42 @@ export function planToEvents(plan: MergePlan, options: PlanToEventsOptions): Pla
   }
 
   return { events, idsByRef };
+}
+
+
+/**
+ * Generates a small prerequisite-ordered curriculum for a declared interest.
+ * The result goes through the same validation and merge as a capture, so the
+ * graph rules (joint premises, deterministic merge) stay identical.
+ */
+export async function generateCurriculum(
+  input: {
+    domain: string;
+    level: 'beginner' | 'intermediate' | 'advanced';
+    count?: number;
+    existingStatements?: string[];
+  },
+  options: { llm: LlmPort; maxTokens?: number },
+): Promise<ExtractResult> {
+  const raw = await options.llm.complete({
+    messages: buildCurriculumMessages({
+      domain: input.domain,
+      level: input.level,
+      count: input.count ?? 6,
+      ...(input.existingStatements ? { existingStatements: input.existingStatements } : {}),
+    }),
+    temperature: 0.3,
+    maxTokens: options.maxTokens ?? 2500,
+  });
+  let parsed: unknown;
+  try {
+    parsed = extractJsonObject(raw);
+  } catch (err) {
+    throw new ExtractionError(`课程生成输出不是合法 JSON：${(err as Error).message}`);
+  }
+  const { candidate, issues } = validateCandidateJson(parsed);
+  if (!candidate) throw new ExtractionError('课程生成结果未通过校验', issues);
+  // The declared domain wins: it is the interest key, not a model suggestion.
+  candidate.domain = input.domain;
+  return { candidate, promptVersion: CURRICULUM_PROMPT_VERSION, raw };
 }

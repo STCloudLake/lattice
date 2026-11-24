@@ -12,6 +12,7 @@ import {
   extractCandidate,
   normalizeSource,
   planToEvents,
+  generateCurriculum,
   resolveIdentity,
   type LlmPort,
   type LlmRequest,
@@ -229,5 +230,33 @@ describe('merge plan + events', () => {
     const plan = buildMergePlan(candidate, identity);
     expect(plan.create.map((c) => c.ref)).toEqual(['p2', 'p3']);
     expect(plan.reuse).toEqual([{ ref: 'p1', existingId: 'e1' }]);
+  });
+});
+
+
+describe('generateCurriculum', () => {
+  it('forces the declared domain and uses the curriculum prompt', async () => {
+    const llm = fakeLlm([
+      JSON.stringify({
+        domain: '模型自己写的领域',
+        propositions: [
+          { ref: 'c1', statement: '算法是解决问题的有限步骤序列。', name: '算法' },
+          { ref: 'c2', statement: '时间复杂度描述增长趋势。', name: '复杂度' },
+        ],
+        chains: [{ premises: ['c2'], conclusion: 'c1', strength: 0.5 }],
+      }),
+    ]);
+    const result = await generateCurriculum({ domain: '计算机', level: 'beginner', count: 2 }, { llm });
+    expect(result.candidate.domain).toBe('计算机');
+    expect(result.promptVersion).toBe('curriculum-v1');
+    expect(llm.calls[0]!.messages[0]!.content).toContain('课程设计者');
+    expect(llm.calls[0]!.messages[1]!.content).toContain('计算机');
+  });
+
+  it('rejects output that is not JSON', async () => {
+    const llm = fakeLlm(['我给你讲个故事']);
+    await expect(generateCurriculum({ domain: '计算机', level: 'beginner' }, { llm })).rejects.toBeInstanceOf(
+      ExtractionError,
+    );
   });
 });
