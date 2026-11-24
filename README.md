@@ -2,7 +2,7 @@
 
 **An inspectable learner model for ambient learning.** Local-first, open source (Apache-2.0), no account, no telemetry.
 
-> Status: **M0 skeleton** — the data spine works end to end (event log → four ledgers → FSRS + Beta mastery → queue → export/replay/calibration). Content extraction, the knowledge graph, path planning and the push policy are **not** in M0. See [docs/m0-report.md](docs/m0-report.md) for exactly what is and is not built.
+> Status: **M1a** — the data spine works end to end (event log → four ledgers → FSRS + Beta mastery → queue → export/replay/calibration), and content can now be turned into a knowledge graph: paste text → LLM extracts propositions + reasoning chains → you review and confirm → chains give derived prerequisites. Path planning, push policy and capture from pages/PDF are still ahead. See [docs/m0-report.md](docs/m0-report.md) for the M0 baseline.
 
 Lattice keeps four separate ledgers about a learner and never mixes them:
 
@@ -24,7 +24,7 @@ The one rule that shapes the whole design: **attention is not evidence of unders
 ```bash
 npm install
 npm run build          # compiles @lattice/core and bundles the extension
-npm test               # 37 tests (core + CLI)
+npm test               # 53 tests (core + extract + CLI)
 npm run verify         # 7 acceptance checks
 npm run verify:e2e     # + loads the extension in a real browser (needs Chrome/Edge)
 ```

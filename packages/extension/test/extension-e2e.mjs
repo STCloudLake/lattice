@@ -18,6 +18,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -38,6 +39,94 @@ const BROWSER_CANDIDATES = [
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ---------------------------------------------------------------------------
+// Local OpenAI-compatible stub provider.
+//
+// This is the acceptance proof that capture works with no real key: the E2E
+// configures this endpoint through the settings dialog, captures text, checks
+// the preview and confirms it. The stub answers the extraction prompt with a
+// canned candidate (3 propositions / 1 chain) and the identity prompt with
+// "all new".
+// ---------------------------------------------------------------------------
+
+const CAPTURE_TEXT = [
+  '机会成本是你为了得到某样东西而放弃的最佳替代方案的价值。',
+  '沉没成本是已经发生且无法收回的成本。',
+  '因为沉没成本无法收回，所以理性决策不应考虑沉没成本。',
+].join('\n');
+
+const STUB_EXTRACTION = {
+  propositions: [
+    {
+      ref: 'p1',
+      statement: '机会成本是为了得到某样东西而放弃的最佳替代方案的价值。',
+      name: '机会成本',
+      quote: '机会成本是你为了得到某样东西而放弃的最佳替代方案的价值。',
+    },
+    {
+      ref: 'p2',
+      statement: '沉没成本是已经发生且无法收回的成本。',
+      name: '沉没成本',
+      quote: '沉没成本是已经发生且无法收回的成本。',
+    },
+    {
+      ref: 'p3',
+      statement: '理性决策不应考虑沉没成本。',
+      name: '沉没成本谬误',
+      quote: '理性决策不应考虑沉没成本。',
+    },
+  ],
+  chains: [{ premises: ['p1', 'p2'], conclusion: 'p3', strength: 0.8 }],
+};
+
+async function startStubProvider() {
+  const requests = [];
+  const server = createServer((req, res) => {
+    // Deliberately no CORS / CORP headers: the real DeepSeek/OpenAI APIs do not
+    // send them either. The manifest `host_permissions` are what let the
+    // extension worker call the endpoint — this E2E proves exactly that path.
+    const cors = {};
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, cors);
+      res.end();
+      return;
+    }
+    if (req.method !== 'POST' || !String(req.url ?? '').startsWith('/v1/chat/completions')) {
+      res.writeHead(404, { ...cors, 'Content-Type': 'application/json' });
+      res.end('{"error":{"message":"not found"}}');
+      return;
+    }
+    let raw = '';
+    req.on('data', (chunk) => {
+      raw += chunk;
+    });
+    req.on('end', () => {
+      let body = {};
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        body = {};
+      }
+      const system = String(body?.messages?.[0]?.content ?? '');
+      requests.push({ model: body.model ?? null, system: system.slice(0, 20) });
+      let content;
+      if (system.includes('知识抽取器')) content = JSON.stringify(STUB_EXTRACTION);
+      else if (system.includes('命题去重')) content = JSON.stringify({ decisions: [] });
+      else content = 'OK';
+      res.writeHead(200, { ...cors, 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          model: body.model,
+          choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
+        }),
+      );
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  return { server, port, baseUrl: `http://127.0.0.1:${port}/v1`, requests };
 }
 
 async function findBrowser() {
@@ -156,6 +245,7 @@ function createHarness(page) {
 async function main() {
   const browserPath = await findBrowser();
   const profileDir = await mkdtemp(path.join(tmpdir(), 'lattice-e2e-'));
+  const stub = await startStubProvider();
   const browser = spawn(
     browserPath,
     [
@@ -301,7 +391,124 @@ async function main() {
     );
     console.log(`reload:  ${afterReload}（事件日志持久化成功）`);
 
-    // 5) second tab in the same profile: must at least boot without fatal errors
+    // 5) M1a acceptance: configure the stub provider through the UI, capture
+    //    text, inspect the preview, confirm it, and check the counters/coverage.
+    console.log(`stub:    ${stub.baseUrl}（本地假模型，无需真实 Key）`);
+    await harness.eval('document.getElementById("btn-settings").click()');
+    await harness.waitFor('document.getElementById("dialog-settings").open === true', '设置对话框');
+    await harness.eval(`
+      (() => {
+        const setValue = (id, value) => {
+          const element = document.getElementById(id);
+          element.value = value;
+          element.dispatchEvent(new Event('input', { bubbles: true }));
+          element.dispatchEvent(new Event('change', { bubbles: true }));
+        };
+        setValue('provider-preset', 'local');
+        setValue('provider-base-url', ${JSON.stringify(stub.baseUrl)});
+        setValue('provider-model', 'stub-model');
+        setValue('provider-key', '');
+        document.getElementById('btn-provider-save').click();
+      })()
+    `);
+    await harness.waitFor(
+      'document.getElementById("provider-status").textContent.includes("stub-model")',
+      '模型配置保存到 chrome.storage.local',
+    );
+    const providerStatus = await harness.eval('document.getElementById("provider-status").textContent');
+    console.log(`provider: ${providerStatus}`);
+
+    await harness.eval('document.getElementById("btn-provider-test").click()');
+    await harness.waitFor(
+      'document.getElementById("provider-status").textContent.includes("连接成功")',
+      '测试连接（worker 真实请求 stub provider）',
+      30000,
+    );
+    const testStatus = await harness.eval('document.getElementById("provider-status").textContent');
+    console.log(`test:    ${testStatus}`);
+    await harness.eval('document.getElementById("btn-settings-close").click()');
+
+    await harness.eval('document.getElementById("btn-capture").click()');
+    await harness.waitFor('document.getElementById("dialog-capture").open === true', '捕获对话框');
+    await harness.eval(`
+      (() => {
+        const setValue = (id, value) => {
+          const element = document.getElementById(id);
+          element.value = value;
+          element.dispatchEvent(new Event('input', { bubbles: true }));
+        };
+        setValue('capture-title', '机会成本与沉没成本');
+        setValue('capture-text', ${JSON.stringify(CAPTURE_TEXT)});
+        document.getElementById('btn-capture-extract').click();
+      })()
+    `);
+    await harness.waitFor('document.getElementById("capture-preview").hidden === false', '抽取预览', 60000);
+    const previewStats = await harness.eval(`({
+      title: document.getElementById("capture-preview-title").textContent,
+      props: document.querySelectorAll("#capture-props .preview-prop").length,
+      chains: document.querySelectorAll("#capture-chains .preview-chain").length,
+      checkedProps: document.querySelectorAll("#capture-props input[type=checkbox]:checked").length,
+      checkedChains: document.querySelectorAll("#capture-chains input[type=checkbox]:checked").length,
+      chainText: document.querySelector("#capture-chains .preview-chain-body").textContent,
+      droppedHidden: document.getElementById("capture-dropped").hidden,
+    })`);
+    console.log(`capture: ${previewStats.title}`);
+    console.log(`         ${previewStats.chainText}`);
+    assert.equal(previewStats.props, 3, '预览应有 3 条命题');
+    assert.equal(previewStats.chains, 1, '预览应有 1 条推理链');
+    assert.equal(previewStats.checkedProps, 3, '命题应默认全选');
+    assert.equal(previewStats.checkedChains, 1, '强度 ≥ 0.5 的推理链应默认勾选');
+    assert.match(previewStats.chainText, /前提 .+ ⟹ 结论 /);
+    assert.equal(previewStats.droppedHidden, true, '没有丢弃项时不应显示丢弃列表');
+    assert.ok(stub.requests.length >= 2, `stub 应收到抽取 + 去重两次调用（实际 ${stub.requests.length}）`);
+
+    await harness.eval('document.getElementById("btn-capture-confirm").click()');
+    await harness.waitFor(
+      'document.getElementById("toast").textContent.includes("已入库 3 条命题")',
+      '确认入库 toast',
+      30000,
+    );
+    await harness.waitFor('document.getElementById("counter-total").textContent.includes("11")', '入库后计数器更新');
+    const afterCapture = await harness.eval(
+      '["counter-review","counter-new","counter-total"].map((id) => document.getElementById(id).textContent).join(" / ")',
+    );
+    console.log(`入库:    ${afterCapture}（8 条示例命题 + 3 条捕获）`);
+
+    // coverage: capturing the same text again must be short-circuited.
+    const requestsBeforeCoverage = stub.requests.length;
+    await harness.eval('document.getElementById("btn-capture").click()');
+    await harness.waitFor('document.getElementById("dialog-capture").open === true', '再次打开捕获对话框');
+    await harness.eval(`
+      (() => {
+        const element = document.getElementById('capture-text');
+        element.value = ${JSON.stringify(CAPTURE_TEXT)};
+        element.dispatchEvent(new Event('input', { bubbles: true }));
+        document.getElementById('btn-capture-extract').click();
+      })()
+    `);
+    await harness.waitFor(
+      'document.getElementById("capture-coverage").hidden === false && document.getElementById("capture-coverage-text").textContent.includes("3 条命题")',
+      'coverage 命中提示',
+      30000,
+    );
+    const coverageText = await harness.eval('document.getElementById("capture-coverage-text").textContent');
+    console.log(`coverage: ${coverageText}`);
+    assert.equal(stub.requests.length, requestsBeforeCoverage, 'coverage 命中时不应再调用模型');
+    await harness.eval('document.getElementById("btn-capture-cancel").click()');
+
+    // diagnostics after capture: graph stats + model line (never the key)
+    await harness.eval('document.getElementById("btn-diagnostics").click()');
+    await harness.waitFor('document.getElementById("diag-text").textContent.includes("图谱:")', '诊断图谱统计');
+    const diagAfterCapture = await harness.eval('document.getElementById("diag-text").textContent');
+    const modelLine = diagAfterCapture.split('\n').find((line) => line.startsWith('模型:')) ?? '(缺失)';
+    const graphLine = diagAfterCapture.split('\n').find((line) => line.startsWith('图谱:')) ?? '(缺失)';
+    console.log(`diag:    ${modelLine.trim()} · ${graphLine.trim()}`);
+    assert.match(diagAfterCapture, /模型: stub-model \(local\)/);
+    assert.match(diagAfterCapture, /图谱: 命题 11 · 推理链 1/);
+    assert.doesNotMatch(diagAfterCapture, /sk-/);
+    await harness.eval('document.getElementById("btn-diag-close").click()');
+
+    // 6) second tab in the same profile: must at least boot without fatal errors
     const secondTarget = await fetch(`${BASE}/json/new?${encodeURIComponent(pageUrl)}`, { method: 'PUT' }).then((response) =>
       response.json(),
     );
@@ -328,7 +535,7 @@ async function main() {
     console.log(`2nd tab storage: ${secondStorage.trim()}`);
     second.close();
 
-    // 6) no uncaught errors / CSP violations
+    // 7) no uncaught errors / CSP violations
     const realErrors = consoleErrors.filter(
       (entry) => !entry.includes('favicon') && !entry.includes('net::ERR_FILE_NOT_FOUND'),
     );
@@ -342,6 +549,7 @@ async function main() {
   } finally {
     pageClient?.close();
     browser.kill();
+    stub.server.close();
     await sleep(400);
     await rm(profileDir, { recursive: true, force: true }).catch(() => {});
     if (browserErrors.includes('DevTools listening')) {

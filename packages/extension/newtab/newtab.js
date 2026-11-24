@@ -10,6 +10,22 @@ const SAMPLE_PACK_URL = new URL('../data/sample-pack.json', import.meta.url);
 const RPC_REQUEST = 'lattice-rpc';
 const RPC_RESULT = 'lattice-rpc-result';
 const RPC_TIMEOUT_MS = 30000;
+/** Long operations need more than the default RPC timeout. */
+const RPC_TIMEOUTS = { extractPreview: 150000, providerTest: 75000, commitExtraction: 60000 };
+
+/** One storage key holds the whole provider config — and nothing else holds the key. */
+const PROVIDER_STORAGE_KEY = 'latticeProvider';
+
+const PROVIDER_PRESETS = {
+  deepseek: { baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
+  openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+  local: { baseUrl: 'http://127.0.0.1:11434/v1', model: 'qwen2.5:7b' },
+  custom: { baseUrl: '', model: '' },
+};
+
+const PROVIDER_PRESET_VALUES = Object.keys(PROVIDER_PRESETS);
+
+const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '0.0.0.0']);
 
 // ---------------------------------------------------------------------------
 // DOM
@@ -30,6 +46,7 @@ const els = {
   viewFatal: $('view-fatal'),
 
   btnSample: $('btn-sample'),
+  btnCaptureEmpty: $('btn-capture-empty'),
   btnImportPackFile: $('btn-import-pack-file'),
   btnPastePack: $('btn-paste-pack'),
 
@@ -55,6 +72,7 @@ const els = {
   btnImport: $('btn-import'),
   btnDiagnostics: $('btn-diagnostics'),
   btnClear: $('btn-clear'),
+  btnCapture: $('btn-capture'),
 
   filePack: $('file-pack'),
   fileJsonl: $('file-jsonl'),
@@ -85,6 +103,38 @@ const els = {
   setDigest: $('set-digest'),
   btnSettingsClose: $('btn-settings-close'),
 
+  providerPreset: $('provider-preset'),
+  providerBaseUrl: $('provider-base-url'),
+  providerModel: $('provider-model'),
+  providerKey: $('provider-key'),
+  providerStatus: $('provider-status'),
+  providerError: $('provider-error'),
+  btnProviderTest: $('btn-provider-test'),
+  btnProviderSave: $('btn-provider-save'),
+
+  dialogCapture: $('dialog-capture'),
+  captureProvider: $('capture-provider'),
+  captureTitle: $('capture-title'),
+  captureText: $('capture-text'),
+  captureStatus: $('capture-status'),
+  captureError: $('capture-error'),
+  captureCoverage: $('capture-coverage'),
+  captureCoverageText: $('capture-coverage-text'),
+  btnCaptureReextract: $('btn-capture-reextract'),
+  capturePreview: $('capture-preview'),
+  capturePreviewTitle: $('capture-preview-title'),
+  captureProps: $('capture-props'),
+  capturePropsCount: $('capture-props-count'),
+  captureChains: $('capture-chains'),
+  captureChainsCount: $('capture-chains-count'),
+  captureNoChains: $('capture-no-chains'),
+  captureDropped: $('capture-dropped'),
+  captureDroppedSummary: $('capture-dropped-summary'),
+  captureDroppedList: $('capture-dropped-list'),
+  btnCaptureCancel: $('btn-capture-cancel'),
+  btnCaptureExtract: $('btn-capture-extract'),
+  btnCaptureConfirm: $('btn-capture-confirm'),
+
   dialogClear: $('dialog-clear'),
   clearConfirm: $('clear-confirm'),
   clearError: $('clear-error'),
@@ -109,6 +159,10 @@ const state = {
   view: 'loading',
   answered: new Set(), // queue keys answered in this page session (quiz mode needs it)
   diagnostics: null,
+  provider: null, // {preset, baseUrl, model, apiKey} from chrome.storage.local
+  capture: null, // preview state; holds ONLY the JSON plan + display rows
+  captureBusy: false,
+  captureForce: false, // true when the user chose "仍然重新抽取"
 };
 
 let pendingJsonlText = '';
@@ -132,7 +186,11 @@ function ensureWorker() {
     pendingRpc.delete(message.id);
     clearTimeout(entry.timer);
     if (message.ok) entry.resolve(message.result);
-    else entry.reject(new Error(message.error || '工作线程返回错误'));
+    else {
+      const error = new Error(message.error || '工作线程返回错误');
+      if (Array.isArray(message.issues)) error.issues = message.issues;
+      entry.reject(error);
+    }
   });
   worker.addEventListener('error', (event) => {
     console.error('[Lattice] worker error', event);
@@ -153,17 +211,233 @@ function rejectAllPending(reason) {
   pendingRpc.clear();
 }
 
-function rpc(op, args = {}) {
+function rpc(op, args = {}, timeoutMs = RPC_TIMEOUTS[op] ?? RPC_TIMEOUT_MS) {
   const activeWorker = ensureWorker();
   const id = (nextRpcId += 1);
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pendingRpc.delete(id);
       reject(new Error(`操作超时：${op}`));
-    }, RPC_TIMEOUT_MS);
+    }, timeoutMs);
     pendingRpc.set(id, { resolve, reject, timer });
     activeWorker.postMessage({ type: RPC_REQUEST, id, op, args });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Provider config (BYOK)
+//
+// The API key lives only in chrome.storage.local under PROVIDER_STORAGE_KEY.
+// It is sent to the worker per request (in memory) and is never written to
+// SQLite, the event log, diagnostics text or exports.
+// ---------------------------------------------------------------------------
+
+function storageArea() {
+  return globalThis.chrome?.storage?.local ?? null;
+}
+
+function sanitizeProviderConfig(value) {
+  if (!value || typeof value !== 'object') return null;
+  const preset = PROVIDER_PRESET_VALUES.includes(value.preset) ? value.preset : 'custom';
+  const baseUrl = typeof value.baseUrl === 'string' ? value.baseUrl.trim() : '';
+  const model = typeof value.model === 'string' ? value.model.trim() : '';
+  const apiKey = typeof value.apiKey === 'string' ? value.apiKey : '';
+  if (!baseUrl && !model && !apiKey) return null;
+  return { preset, baseUrl, model, apiKey };
+}
+
+async function loadProviderConfig() {
+  const area = storageArea();
+  if (!area) return;
+  try {
+    const got = (await area.get(PROVIDER_STORAGE_KEY)) ?? {};
+    state.provider = sanitizeProviderConfig(got[PROVIDER_STORAGE_KEY]);
+  } catch {
+    state.provider = null; // a broken settings read must not break the newtab page
+  }
+}
+
+function providerSummary(config) {
+  if (!config || !config.model) return '未配置';
+  return `${config.model} (${config.preset})`;
+}
+
+function providerReady(config) {
+  if (!config || !config.baseUrl || !config.model) return false;
+  return Boolean(config.apiKey) || isLocalBaseUrl(config.baseUrl);
+}
+
+function isLocalBaseUrl(baseUrl) {
+  try {
+    return LOCAL_HOSTS.has(new URL(baseUrl).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function providerOrigin(baseUrl) {
+  try {
+    const url = new URL(baseUrl);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+    return url.origin;
+  } catch {
+    return '';
+  }
+}
+
+/** True when this base URL needs a runtime host permission (custom https host). */
+function needsHostPermission(baseUrl) {
+  const origin = providerOrigin(baseUrl);
+  if (!origin) return false;
+  const url = new URL(baseUrl);
+  if (LOCAL_HOSTS.has(url.hostname)) return false;
+  if (url.hostname === 'api.deepseek.com' || url.hostname === 'api.openai.com') return false;
+  return url.protocol === 'https:';
+}
+
+function readProviderForm() {
+  return {
+    preset: PROVIDER_PRESET_VALUES.includes(els.providerPreset.value) ? els.providerPreset.value : 'custom',
+    baseUrl: els.providerBaseUrl.value.trim(),
+    model: els.providerModel.value.trim(),
+    apiKey: els.providerKey.value,
+  };
+}
+
+/** Chinese validation message, or '' when the form is usable. */
+function providerFormError(config) {
+  if (!config.baseUrl) return '请填写接口地址（例如 https://api.deepseek.com/v1）';
+  let url;
+  try {
+    url = new URL(config.baseUrl);
+  } catch {
+    return '接口地址不是合法的 URL（例如 https://api.deepseek.com/v1）';
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return '接口地址必须以 http:// 或 https:// 开头';
+  if (url.protocol === 'http:' && !LOCAL_HOSTS.has(url.hostname)) {
+    return '非本机接口必须使用 https://（本机可用 http://127.0.0.1 或 http://localhost）';
+  }
+  if (!config.model) return '请填写模型名称（例如 deepseek-chat）';
+  if (!config.apiKey && !LOCAL_HOSTS.has(url.hostname)) return '请填写 API Key（本机接口可留空）';
+  return '';
+}
+
+function showProviderError(message) {
+  els.providerError.textContent = message || '';
+  els.providerError.hidden = !message;
+}
+
+function paintProviderStatus(text) {
+  if (typeof text === 'string') {
+    els.providerStatus.textContent = text;
+    return;
+  }
+  if (state.provider && state.provider.model) {
+    els.providerStatus.textContent = `当前模型: ${providerSummary(state.provider)}`;
+  } else {
+    els.providerStatus.textContent = '尚未配置模型';
+  }
+}
+
+function fillProviderForm() {
+  const config = state.provider;
+  const preset = config ? config.preset : 'deepseek';
+  els.providerPreset.value = preset;
+  const presetDefaults = PROVIDER_PRESETS[preset] ?? PROVIDER_PRESETS.custom;
+  els.providerBaseUrl.value = config ? config.baseUrl : presetDefaults.baseUrl;
+  els.providerModel.value = config ? config.model : presetDefaults.model;
+  els.providerKey.value = config ? config.apiKey : '';
+  showProviderError('');
+  paintProviderStatus();
+}
+
+function applyProviderPreset(preset) {
+  const defaults = PROVIDER_PRESETS[preset];
+  if (!defaults) return;
+  if (preset !== 'custom') {
+    els.providerBaseUrl.value = defaults.baseUrl;
+    els.providerModel.value = defaults.model;
+  }
+  showProviderError('');
+}
+
+function onProviderPresetChange() {
+  applyProviderPreset(els.providerPreset.value);
+}
+
+async function persistProvider(config) {
+  const area = storageArea();
+  try {
+    if (area) await area.set({ [PROVIDER_STORAGE_KEY]: config });
+  } catch (err) {
+    showProviderError(`保存失败：${err?.message ?? err}`);
+    return;
+  }
+  state.provider = config;
+  paintProviderStatus();
+  showProviderError('');
+  toast('模型配置已保存');
+}
+
+/**
+ * 保存 must stay inside the click gesture because chrome.permissions.request
+ * only works in a user gesture — hence the request is issued synchronously.
+ */
+function onProviderSave() {
+  const config = readProviderForm();
+  const error = providerFormError(config);
+  if (error) {
+    showProviderError(error);
+    return;
+  }
+  if (!needsHostPermission(config.baseUrl)) {
+    void persistProvider(config);
+    return;
+  }
+  const origin = providerOrigin(config.baseUrl);
+  const permissions = globalThis.chrome?.permissions;
+  if (!permissions || typeof permissions.request !== 'function') {
+    showProviderError('当前环境无法申请接口访问权限，请检查浏览器是否支持可选站点权限');
+    return;
+  }
+  // Called before any await: the user gesture is still active here.
+  const granted = permissions.request({ origins: [`${origin}/*`] });
+  void granted
+    .then((ok) => {
+      if (!ok) {
+        showProviderError(`未授予访问 ${origin} 的权限，无法调用该接口。请重试并在弹窗中点击「允许」。`);
+        return;
+      }
+      void persistProvider(config);
+    })
+    .catch(() => {
+      showProviderError(`申请访问 ${origin} 的权限失败，请检查接口地址是否正确`);
+    });
+}
+
+async function onProviderTest() {
+  const config = readProviderForm();
+  const error = providerFormError(config);
+  if (error) {
+    showProviderError(error);
+    return;
+  }
+  els.btnProviderTest.disabled = true;
+  paintProviderStatus('正在测试连接…');
+  showProviderError('');
+  try {
+    const result = await rpc('providerTest', { provider: config });
+    const latency = Math.max(0, Math.round(Number(result.latencyMs) || 0));
+    const reply = result.reply ? ` · 回复 ${result.reply}` : '';
+    paintProviderStatus(`连接成功 · 延迟 ${latency}ms · 模型 ${result.model}${reply}`);
+    toast('模型连接成功');
+  } catch (err) {
+    paintProviderStatus('连接失败');
+    showProviderError(err?.message ?? String(err));
+    toast(err?.message ?? '模型连接失败');
+  } finally {
+    els.btnProviderTest.disabled = false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +448,7 @@ async function boot() {
   state.fatal = false;
   showView('loading');
   try {
+    await loadProviderConfig();
     const init = await rpc('init');
     if (init.storage === 'fallback') {
       const detail = init.persisted ? 'chrome.storage 持久化' : '仅内存（未检测到 chrome.storage）';
@@ -451,7 +726,7 @@ function storageLabel(info) {
   return info.storage === 'opfs' ? 'OPFS' : '回退(chrome.storage)';
 }
 
-function formatDiagnostics(info) {
+function formatDiagnostics(info, graph) {
   const counts = info.counts ?? {};
   const lines = [];
   lines.push('Lattice M0 诊断');
@@ -461,12 +736,20 @@ function formatDiagnostics(info) {
     lines.push('  备注: 回退模式下未检测到可用的持久化通道，本次仅内存，关闭页面后丢失');
   }
   lines.push(`设备 ID: ${info.deviceId}`);
+  lines.push(`模型: ${providerSummary(state.provider)}`);
+  if (graph) {
+    lines.push(
+      `图谱: 命题 ${graph.propositions} · 推理链 ${graph.chains} · 基础 ${graph.foundation} · 有前置 ${graph.withPrereq} · 已掌握 ${graph.mastered}`,
+    );
+  }
   lines.push(`事件序号: ${info.lastSeq}`);
   lines.push(`校验摘要: ${info.digest}`);
   lines.push(
     `统计: 命题 ${counts.propositions ?? 0} · 卡 ${counts.cues ?? 0} · 复习 ${counts.reviews ?? 0} · 到期 ${
       counts.due ?? 0
-    } · 新学 ${counts.new ?? 0} · 事件 ${info.eventCount ?? counts.events ?? 0}`,
+    } · 新学 ${counts.new ?? 0} · 事件 ${info.eventCount ?? counts.events ?? 0}${
+      typeof info.coverageCount === 'number' ? ` · 覆盖 ${info.coverageCount} 段` : ''
+    }`,
   );
   if (Array.isArray(info.openErrors) && info.openErrors.length > 0) {
     lines.push('存储回退原因:');
@@ -486,9 +769,12 @@ async function openDiagnostics() {
   els.diagText.textContent = '正在读取…';
   openDialog(els.dialogDiagnostics);
   try {
-    const info = await rpc('diagnostics');
+    const [info, graph] = await Promise.all([
+      rpc('diagnostics'),
+      rpc('graphSummary').catch(() => null),
+    ]);
     state.diagnostics = info;
-    els.diagText.textContent = formatDiagnostics(info);
+    els.diagText.textContent = formatDiagnostics(info, graph);
   } catch (err) {
     els.diagText.textContent = `诊断失败：${err.message}`;
   }
@@ -506,6 +792,7 @@ function openSettings() {
   for (const radio of document.querySelectorAll('input[name="mode"]')) {
     radio.checked = radio.value === state.mode;
   }
+  fillProviderForm();
   openDialog(els.dialogSettings);
 }
 
@@ -543,6 +830,356 @@ async function clearAll() {
     toast(err.message);
   } finally {
     state.busy = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Capture: text -> model extraction -> preview -> confirmed events
+//
+// Nothing the model produces is committed here: the user sees/edits the plan
+// and only then does the page send the (filtered) JSON plan back to the worker.
+// ---------------------------------------------------------------------------
+
+function openCaptureDialog() {
+  state.capture = null;
+  state.captureForce = false;
+  els.captureTitle.value = '';
+  els.captureText.value = '';
+  els.captureStatus.hidden = true;
+  els.captureError.hidden = true;
+  els.captureCoverage.hidden = true;
+  els.capturePreview.hidden = true;
+  els.btnCaptureConfirm.disabled = true;
+  setCaptureBusy(false);
+  paintCaptureProviderLine();
+  openDialog(els.dialogCapture);
+  els.captureText.focus();
+}
+
+function paintCaptureProviderLine() {
+  if (state.provider && providerReady(state.provider)) {
+    els.captureProvider.textContent = `当前模型: ${providerSummary(state.provider)}（在 ⚙ 设置里修改）`;
+    els.captureProvider.classList.remove('error');
+  } else {
+    els.captureProvider.textContent = '尚未配置模型：请先点右上角 ⚙，在「模型」里填写接口地址、模型和 API Key。';
+    els.captureProvider.classList.add('error');
+  }
+}
+
+function setCaptureBusy(busy) {
+  state.captureBusy = busy;
+  els.btnCaptureExtract.disabled = busy;
+  els.btnCaptureReextract.disabled = busy;
+  els.btnCaptureConfirm.disabled = busy || !state.capture;
+}
+
+function showCaptureError(message) {
+  els.captureError.textContent = message || '';
+  els.captureError.hidden = !message;
+}
+
+/** Chinese error text + at most 3 validation issue lines; never a stack. */
+function captureErrorText(err) {
+  const lines = [err && err.message ? err.message : '抽取失败'];
+  const issues = err && Array.isArray(err.issues) ? err.issues.slice(0, 3) : [];
+  for (const issue of issues) {
+    const path = issue && typeof issue.path === 'string' ? issue.path : '';
+    const text = issue && typeof issue.message === 'string' ? issue.message : String(issue);
+    lines.push(`· ${[path, text].filter(Boolean).join(' ')}`);
+  }
+  return lines.join('\n');
+}
+
+function formatCapturedAt(iso) {
+  if (!iso) return '未知时间';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '未知时间';
+  try {
+    return date.toLocaleString('zh-CN', { dateStyle: 'medium', timeStyle: 'short' });
+  } catch {
+    return date.toISOString().slice(0, 16).replace('T', ' ');
+  }
+}
+
+async function runExtraction(force = false) {
+  if (state.captureBusy) return;
+  const text = els.captureText.value;
+  if (!text.trim()) {
+    showCaptureError('请先粘贴要拆解的文本');
+    return;
+  }
+  if (!state.provider || !providerReady(state.provider)) {
+    showCaptureError('尚未配置模型：请点右上角 ⚙，在「模型」里填写接口地址、模型名称和 API Key。');
+    return;
+  }
+
+  state.captureForce = force;
+  setCaptureBusy(true);
+  showCaptureError('');
+  els.captureCoverage.hidden = true;
+  els.capturePreview.hidden = true;
+  els.captureStatus.hidden = false;
+  els.captureStatus.textContent = '正在调用模型抽取…（最长约 60 秒）';
+  try {
+    const result = await rpc('extractPreview', {
+      text,
+      title: els.captureTitle.value.trim(),
+      sourceKind: 'paste',
+      provider: state.provider,
+      force,
+    });
+    if (result.coverageHit) {
+      state.capture = null;
+      showCoverageHit(result);
+      return;
+    }
+    state.capture = {
+      source: result.source,
+      plan: result.plan,
+      propositions: result.propositions.map((proposition) => ({ ...proposition, checked: true })),
+      chainChecks: result.plan.chains.map((chain) => (Number(chain.strength) || 0) >= 0.5),
+      promptVersion: result.promptVersion,
+      model: result.model,
+      providerLabel: result.providerLabel,
+    };
+    paintPreview();
+    els.capturePreview.hidden = false;
+  } catch (err) {
+    showCaptureError(captureErrorText(err));
+  } finally {
+    els.captureStatus.hidden = true;
+    setCaptureBusy(false);
+  }
+}
+
+function showCoverageHit(result) {
+  els.captureStatus.hidden = true;
+  els.capturePreview.hidden = true;
+  els.captureCoverage.hidden = false;
+  els.captureCoverageText.textContent = `这段内容已经处理过（${result.propositionCount ?? 0} 条命题，${formatCapturedAt(
+    result.extractedAt,
+  )}）`;
+  els.btnCaptureConfirm.disabled = true;
+}
+
+function statementByRef() {
+  const map = new Map();
+  for (const proposition of state.capture.propositions) map.set(proposition.ref, proposition.statement);
+  return map;
+}
+
+function shortStatement(statement, max = 26) {
+  const text = String(statement ?? '').replace(/\s+/g, ' ').trim();
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function paintPreview() {
+  const capture = state.capture;
+  if (!capture) return;
+  els.capturePreviewTitle.textContent = `预览：${capture.propositions.length} 条命题 · ${capture.plan.chains.length} 条推理链`;
+  paintProps();
+  paintChains();
+  paintDropped();
+  els.btnCaptureConfirm.disabled = capture.propositions.every((proposition) => !proposition.checked);
+}
+
+function paintProps() {
+  const capture = state.capture;
+  els.captureProps.textContent = '';
+  els.capturePropsCount.textContent = `（${capture.propositions.length}）`;
+  capture.propositions.forEach((proposition, index) => {
+    const row = document.createElement('label');
+    row.className = 'preview-prop';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = proposition.checked;
+    checkbox.dataset.ref = proposition.ref;
+    checkbox.addEventListener('change', () => {
+      proposition.checked = checkbox.checked;
+      updateChainAvailability();
+      els.btnCaptureConfirm.disabled = capture.propositions.every((entry) => !entry.checked);
+    });
+
+    const body = document.createElement('span');
+    body.className = 'preview-prop-body';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'preview-statement';
+    input.value = proposition.statement;
+    input.dataset.ref = proposition.ref;
+    input.setAttribute('aria-label', `命题 ${index + 1}`);
+    if (proposition.existingId) {
+      // Identity resolution already linked this to an existing proposition:
+      // editing the text here would not change that proposition.
+      input.readOnly = true;
+      input.title = '这条命题已存在，本次会复用它';
+    }
+    input.addEventListener('input', () => {
+      if (proposition.existingId) return;
+      proposition.statement = input.value;
+      syncPlanStatement(proposition.ref, input.value);
+      paintChains();
+    });
+    body.appendChild(input);
+
+    const metaBits = [];
+    if (proposition.name) metaBits.push(proposition.name);
+    if (proposition.quote) metaBits.push(`「${proposition.quote}」`);
+    if (proposition.existingId) metaBits.push('已存在，将复用');
+    else metaBits.push('新命题');
+    if (metaBits.length > 0) {
+      const meta = document.createElement('span');
+      meta.className = 'preview-meta';
+      meta.textContent = metaBits.join(' · ');
+      body.appendChild(meta);
+    }
+
+    row.appendChild(checkbox);
+    row.appendChild(body);
+    els.captureProps.appendChild(row);
+  });
+}
+
+function syncPlanStatement(ref, statement) {
+  const capture = state.capture;
+  if (!capture) return;
+  const createEntry = capture.plan.create.find((entry) => entry.ref === ref);
+  if (createEntry) createEntry.statement = statement;
+  const cue = capture.plan.cues.find((entry) => entry.ref === ref);
+  if (cue) cue.back = statement;
+}
+
+function paintChains() {
+  const capture = state.capture;
+  els.captureChains.textContent = '';
+  els.captureChainsCount.textContent = `（${capture.plan.chains.length}）`;
+  const statements = statementByRef();
+  const rows = [];
+  capture.plan.chains.forEach((chain, index) => {
+    const row = document.createElement('label');
+    row.className = 'preview-chain';
+    row.dataset.index = String(index);
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.dataset.index = String(index);
+    checkbox.checked = Boolean(capture.chainChecks[index]);
+    checkbox.addEventListener('change', () => {
+      capture.chainChecks[index] = checkbox.checked;
+    });
+    const body = document.createElement('span');
+    body.className = 'preview-chain-body';
+    const premiseText = chain.premiseRefs
+      .map((ref) => shortStatement(statements.get(ref) ?? ref))
+      .join(' + ');
+    const conclusionText = shortStatement(statements.get(chain.conclusionRef) ?? chain.conclusionRef);
+    const text = document.createElement('span');
+    text.textContent = `前提 ${premiseText} ⟹ 结论 ${conclusionText} `;
+    const strength = document.createElement('span');
+    strength.className = 'strength';
+    strength.textContent = `置信度 ${(Number(chain.strength) || 0).toFixed(2)}`;
+    text.appendChild(strength);
+    body.appendChild(text);
+    row.appendChild(checkbox);
+    row.appendChild(body);
+    els.captureChains.appendChild(row);
+    rows.push(row);
+  });
+  els.captureNoChains.hidden = rows.length > 0;
+  updateChainAvailability();
+}
+
+function updateChainAvailability() {
+  const capture = state.capture;
+  if (!capture) return;
+  const selected = new Set(capture.propositions.filter((proposition) => proposition.checked).map((p) => p.ref));
+  for (const row of els.captureChains.querySelectorAll('.preview-chain')) {
+    const index = Number(row.dataset.index);
+    const chain = capture.plan.chains[index];
+    if (!chain) continue;
+    const refs = [...chain.premiseRefs, chain.conclusionRef];
+    const available = refs.every((ref) => selected.has(ref));
+    const checkbox = row.querySelector('input[type="checkbox"]');
+    row.classList.toggle('unavailable', !available);
+    checkbox.disabled = !available;
+    checkbox.checked = available && Boolean(capture.chainChecks[index]);
+  }
+}
+
+function paintDropped() {
+  const capture = state.capture;
+  const dropped = Array.isArray(capture.plan.dropped) ? capture.plan.dropped : [];
+  if (dropped.length === 0) {
+    els.captureDropped.hidden = true;
+    els.captureDroppedList.textContent = '';
+    return;
+  }
+  els.captureDropped.hidden = false;
+  els.captureDroppedSummary.textContent = `查看被丢弃的 ${dropped.length} 项`;
+  els.captureDroppedList.textContent = '';
+  for (const entry of dropped) {
+    const item = document.createElement('li');
+    item.textContent = entry && entry.reason ? entry.reason : '未知原因';
+    els.captureDroppedList.appendChild(item);
+  }
+}
+
+function collectPlanForCommit() {
+  const capture = state.capture;
+  const selected = new Set(
+    capture.propositions.filter((proposition) => proposition.checked).map((proposition) => proposition.ref),
+  );
+  const plan = {
+    create: capture.plan.create.filter((entry) => selected.has(entry.ref)),
+    reuse: capture.plan.reuse.filter((entry) => selected.has(entry.ref)),
+    cues: capture.plan.cues.filter((entry) => selected.has(entry.ref)),
+    chains: capture.plan.chains.filter(
+      (chain, index) =>
+        Boolean(capture.chainChecks[index]) &&
+        [...chain.premiseRefs, chain.conclusionRef].every((ref) => selected.has(ref)),
+    ),
+    dropped: [],
+  };
+  return { plan, selected };
+}
+
+async function confirmExtraction() {
+  const capture = state.capture;
+  if (!capture || state.captureBusy) return;
+  const { plan, selected } = collectPlanForCommit();
+  if (selected.size === 0) {
+    showCaptureError('请至少保留一条命题');
+    return;
+  }
+  setCaptureBusy(true);
+  try {
+    const result = await rpc(
+      'commitExtraction',
+      {
+        source: capture.source,
+        plan,
+        providerLabel: capture.providerLabel,
+        model: capture.model,
+        promptVersion: capture.promptVersion,
+        force: state.captureForce,
+      },
+      RPC_TIMEOUTS.commitExtraction,
+    );
+    if (result.alreadyCovered) {
+      toast('这段内容已入库，未重复写入');
+      closeDialogs();
+      await refresh();
+      return;
+    }
+    const parts = [`已入库 ${result.counts.propositions} 条命题 / ${result.counts.chains} 条推理链`];
+    if (result.counts.reused > 0) parts.push(`复用已有 ${result.counts.reused} 条`);
+    if (result.counts.propositions === 0 && result.counts.chains === 0) parts.push('没有新的内容');
+    toast(parts.join('，'));
+    closeDialogs();
+    await refresh();
+  } catch (err) {
+    showCaptureError(captureErrorText(err));
+  } finally {
+    setCaptureBusy(false);
   }
 }
 
@@ -614,6 +1251,7 @@ async function flushPersistence() {
 function wire() {
   // Empty state
   els.btnSample.addEventListener('click', () => void loadSamplePack());
+  els.btnCaptureEmpty.addEventListener('click', openCaptureDialog);
   els.btnImportPackFile.addEventListener('click', () => els.filePack.click());
   els.btnPastePack.addEventListener('click', () => {
     els.packText.value = '';
@@ -647,6 +1285,7 @@ function wire() {
   els.btnFatalDiagnostics.addEventListener('click', () => void openDiagnostics());
 
   // Footer
+  els.btnCapture.addEventListener('click', openCaptureDialog);
   els.btnExport.addEventListener('click', () => void exportLog());
   els.btnImport.addEventListener('click', () => {
     pendingJsonlText = '';
@@ -665,6 +1304,15 @@ function wire() {
       if (radio.checked) setMode(radio.value);
     });
   }
+  els.providerPreset.addEventListener('change', onProviderPresetChange);
+  els.btnProviderSave.addEventListener('click', onProviderSave);
+  els.btnProviderTest.addEventListener('click', () => void onProviderTest());
+
+  // Capture dialog
+  els.btnCaptureCancel.addEventListener('click', closeDialogs);
+  els.btnCaptureExtract.addEventListener('click', () => void runExtraction(false));
+  els.btnCaptureReextract.addEventListener('click', () => void runExtraction(true));
+  els.btnCaptureConfirm.addEventListener('click', () => void confirmExtraction());
 
   // Pack dialog
   els.btnPackCancel.addEventListener('click', closeDialogs);

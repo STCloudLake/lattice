@@ -4,6 +4,13 @@
   "version": "0.1.0",
   "description": "An inspectable learner model — M0 skeleton",
   "permissions": ["storage", "unlimitedStorage"],
+  "host_permissions": [
+    "https://api.deepseek.com/*",
+    "https://api.openai.com/*",
+    "http://127.0.0.1:*/*",
+    "http://localhost:*/*"
+  ],
+  "optional_host_permissions": ["https://*/*"],
   "background": {
     "service_worker": "background.js"
   },

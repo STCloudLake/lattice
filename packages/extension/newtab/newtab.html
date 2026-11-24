@@ -34,6 +34,7 @@
           </p>
           <div class="row">
             <button class="btn primary" id="btn-sample" type="button">载入示例包</button>
+            <button class="btn" id="btn-capture-empty" type="button">捕获文本</button>
             <button class="btn" id="btn-import-pack-file" type="button">导入 JSON 文件</button>
             <button class="btn" id="btn-paste-pack" type="button">粘贴 JSON</button>
           </div>
@@ -82,6 +83,7 @@
       </main>
 
       <footer class="footer">
+        <button class="btn ghost" id="btn-capture" type="button">捕获文本</button>
         <button class="btn ghost" id="btn-export" type="button">导出</button>
         <button class="btn ghost" id="btn-import" type="button">导入</button>
         <button class="btn ghost" id="btn-diagnostics" type="button">诊断</button>
@@ -159,11 +161,84 @@
             测验（只判对错：只写掌握账）
           </label>
         </fieldset>
+        <fieldset class="fieldset">
+          <legend>模型</legend>
+          <p class="hint muted">
+            捕获文本时把文本发给你配置的 OpenAI 兼容接口。API Key 只保存在本机浏览器存储里，
+            不会写进事件日志、数据库或导出文件。
+          </p>
+          <label class="field">
+            <span>预设</span>
+            <select id="provider-preset">
+              <option value="deepseek">DeepSeek</option>
+              <option value="openai">OpenAI</option>
+              <option value="local">本地（Ollama / LM Studio）</option>
+              <option value="custom">自定义</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>接口地址</span>
+            <input type="text" id="provider-base-url" autocomplete="off" spellcheck="false" placeholder="https://api.deepseek.com/v1" />
+          </label>
+          <label class="field">
+            <span>模型</span>
+            <input type="text" id="provider-model" autocomplete="off" spellcheck="false" placeholder="deepseek-chat" />
+          </label>
+          <label class="field">
+            <span>API Key</span>
+            <input type="password" id="provider-key" autocomplete="off" spellcheck="false" placeholder="本机接口可留空" />
+          </label>
+          <p class="hint muted" id="provider-status">尚未配置模型</p>
+          <p class="error multiline" id="provider-error" hidden></p>
+          <div class="row">
+            <button class="btn" id="btn-provider-test" type="button">测试连接</button>
+            <button class="btn primary" id="btn-provider-save" type="button">保存</button>
+          </div>
+        </fieldset>
         <p class="hint muted">
           M0：无网络、无遥测、本地优先。数据可用「导出」保存为 JSONL，「清空数据」可彻底删除。
         </p>
         <div class="row right">
           <button class="btn" id="btn-settings-close" type="button">关闭</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="dialog-capture" class="wide">
+      <div class="dialog-body">
+        <h2>捕获文本</h2>
+        <p class="hint muted" id="capture-provider">—</p>
+        <label class="field">
+          <span>标题（可选）</span>
+          <input type="text" id="capture-title" autocomplete="off" spellcheck="false" placeholder="例如：机会成本与沉没成本" />
+        </label>
+        <label class="field">
+          <span>要拆解的文本</span>
+          <textarea id="capture-text" rows="8" spellcheck="false" placeholder="粘贴要拆解的文本…"></textarea>
+        </label>
+        <p class="status" id="capture-status" hidden></p>
+        <p class="error multiline" id="capture-error" hidden></p>
+        <div class="coverage-banner" id="capture-coverage" hidden>
+          <p id="capture-coverage-text"></p>
+          <button class="btn" id="btn-capture-reextract" type="button">仍然重新抽取</button>
+        </div>
+        <section id="capture-preview" hidden>
+          <h3 class="preview-title" id="capture-preview-title"></h3>
+          <p class="hint muted">确认前可以修改命题措辞、取消勾选。取消勾选命题会同时丢弃依赖它的推理链。</p>
+          <h4 class="preview-subtitle">命题 <span class="muted" id="capture-props-count"></span></h4>
+          <div class="preview-list" id="capture-props"></div>
+          <h4 class="preview-subtitle">推理链 <span class="muted" id="capture-chains-count"></span></h4>
+          <div class="preview-list" id="capture-chains"></div>
+          <p class="hint muted" id="capture-no-chains" hidden>没有识别到推理链（只有命题也能入库）。</p>
+          <details class="dropped" id="capture-dropped" hidden>
+            <summary id="capture-dropped-summary">查看被丢弃的项</summary>
+            <ul id="capture-dropped-list"></ul>
+          </details>
+        </section>
+        <div class="row right">
+          <button class="btn" id="btn-capture-cancel" type="button">取消</button>
+          <button class="btn" id="btn-capture-extract" type="button">抽取</button>
+          <button class="btn primary" id="btn-capture-confirm" type="button" disabled>确认入库</button>
         </div>
       </div>
     </dialog>

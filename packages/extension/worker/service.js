@@ -14,25 +14,34 @@
 import {
   activePropositions,
   answerQuiz,
+  buildMergePlan,
   buildQueue,
   calibrate,
+  chainKey,
   createEventFactory,
   createIdFactory,
   dueItems,
   emptyMastery,
   exportJsonl as exportEventsJsonl,
+  extractCandidate,
   formatReport,
+  foundationPropositions,
   masterySummary,
   newItems,
+  normalizeSource,
   packToEvents,
   parseJsonl,
   parsePropositionPack,
+  planToEvents,
+  prerequisiteEdges,
   rateReview,
   replay,
+  resolveIdentity,
   retrievability,
   samplesFromState,
   stateDigest,
 } from '../vendor/lattice-core/index.js';
+import { createLlmPort, normalizeProvider, providerLabel as formatProviderLabel, testProvider } from './llm.js';
 import { normalizeStatement } from './util.js';
 
 /** How many new propositions a single queue may introduce. */
@@ -55,6 +64,21 @@ const SCHEMA = [
     value TEXT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS events_order ON events(occurred_at, device_id, seq)`,
+  // Coverage ledger: one row per normalized source text. A row means "this text
+  // was already turned into propositions", so a second capture of the same text
+  // is cheap and cannot duplicate the graph. Not an event: it is a cache of a
+  // pure function of (text, model, promptVersion), rebuildable by re-extraction.
+  `CREATE TABLE IF NOT EXISTS coverage (
+    source_hash TEXT PRIMARY KEY,
+    title TEXT,
+    source_uri TEXT,
+    source_kind TEXT,
+    extracted_at TEXT,
+    proposition_count INTEGER,
+    chain_count INTEGER,
+    model TEXT,
+    prompt_version TEXT
+  )`,
 ];
 
 const INSERT_EVENT_SQL = `INSERT OR IGNORE INTO events
@@ -64,8 +88,118 @@ const INSERT_EVENT_SQL = `INSERT OR IGNORE INTO events
 const UPSERT_META_SQL = `INSERT INTO meta(key, value) VALUES (?, ?)
   ON CONFLICT(key) DO UPDATE SET value = excluded.value`;
 
+const UPSERT_COVERAGE_SQL = `INSERT INTO coverage
+  (source_hash, title, source_uri, source_kind, extracted_at, proposition_count, chain_count, model, prompt_version)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(source_hash) DO UPDATE SET
+    title = excluded.title,
+    source_uri = excluded.source_uri,
+    source_kind = excluded.source_kind,
+    extracted_at = excluded.extracted_at,
+    proposition_count = excluded.proposition_count,
+    chain_count = excluded.chain_count,
+    model = excluded.model,
+    prompt_version = excluded.prompt_version`;
+
+const SELECT_COVERAGE_SQL = `SELECT source_hash, title, source_uri, source_kind, extracted_at,
+    proposition_count, chain_count, model, prompt_version
+  FROM coverage ORDER BY extracted_at`;
+
+const SELECT_COVERAGE_ONE_SQL = `SELECT source_hash, title, source_uri, source_kind, extracted_at,
+    proposition_count, chain_count, model, prompt_version
+  FROM coverage WHERE source_hash = ?`;
+
 const SELECT_EVENTS_SQL = `SELECT id, device_id, seq, occurred_at, recorded_at, actor, type, subject_id, payload
   FROM events ORDER BY occurred_at, device_id, seq`;
+
+/** A proposition counts as "已掌握" when its Beta posterior mean reaches this. */
+const MASTERED_MEAN = 0.6;
+
+const SOURCE_KINDS = new Set(['page', 'pdf', 'video', 'note', 'paste', 'import', 'session']);
+
+function cleanText(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function sourceKindOf(value) {
+  return typeof value === 'string' && SOURCE_KINDS.has(value) ? value : 'paste';
+}
+
+function isIsoDate(value) {
+  return typeof value === 'string' && value.length > 0 && !Number.isNaN(Date.parse(value));
+}
+
+function stringList(value, limit = 20) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim();
+    if (trimmed.length === 0) continue;
+    out.push(trimmed);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/**
+ * Validates the plan that comes back from the preview page. The page is allowed
+ * to filter entries (unchecked propositions/chains) but not to invent shapes.
+ */
+function normalizePlan(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('入库计划为空');
+  const list = (value) => (Array.isArray(value) ? value : []);
+
+  const create = list(raw.create).map((entry, index) => {
+    if (!entry || typeof entry !== 'object') throw new Error(`计划中的第 ${index + 1} 条命题无效`);
+    const ref = cleanText(entry.ref);
+    const statement = cleanText(entry.statement);
+    if (!ref || !statement) throw new Error(`计划中的第 ${index + 1} 条命题缺少 ref 或 statement`);
+    const out = { ref, statement, aliases: stringList(entry.aliases) };
+    const name = cleanText(entry.name);
+    if (name) out.name = name;
+    const quote = cleanText(entry.quote);
+    if (quote) out.quote = quote;
+    return out;
+  });
+
+  const reuse = list(raw.reuse).map((entry) => {
+    if (!entry || typeof entry !== 'object') throw new Error('计划中的复用命题无效');
+    const ref = cleanText(entry.ref);
+    const existingId = cleanText(entry.existingId);
+    if (!ref || !existingId) throw new Error('计划中的复用命题缺少 ref 或 existingId');
+    return { ref, existingId };
+  });
+
+  const cues = list(raw.cues).map((entry) => {
+    if (!entry || typeof entry !== 'object') throw new Error('计划中的卡片无效');
+    const ref = cleanText(entry.ref);
+    const front = cleanText(entry.front);
+    const back = cleanText(entry.back);
+    if (!ref || !front || !back) throw new Error('计划中的卡片缺少 ref / front / back');
+    return { ref, front, back, kind: 'recall' };
+  });
+
+  const chains = list(raw.chains).map((entry) => {
+    if (!entry || typeof entry !== 'object') throw new Error('计划中的推理链无效');
+    const premiseRefs = stringList(entry.premiseRefs);
+    const conclusionRef = cleanText(entry.conclusionRef);
+    if (premiseRefs.length === 0 || !conclusionRef) throw new Error('计划中的推理链缺少前提或结论');
+    let strength = Number(entry.strength);
+    if (!Number.isFinite(strength)) strength = 0.8;
+    strength = Math.min(1, Math.max(0, strength));
+    return { premiseRefs, conclusionRef, strength };
+  });
+
+  return { create, reuse, cues, chains, dropped: [] };
+}
+
+function modelFromLabel(label) {
+  const text = cleanText(label);
+  if (!text) return '';
+  const cut = text.indexOf(' (');
+  return cut > 0 ? text.slice(0, cut) : text;
+}
 
 function parsePayload(raw) {
   if (typeof raw !== 'string' || raw.length === 0) return {};
@@ -100,6 +234,7 @@ export class LatticeService {
   #clock;
   #newId;
   #uuid;
+  #fetchImpl;
   #deviceId = '';
   #seq = 0;
   #events = null;
@@ -116,6 +251,7 @@ export class LatticeService {
    * @param {{now: () => Date}} [options.clock]
    * @param {() => string} [options.idFactory]
    * @param {() => string} [options.uuid]
+   * @param {Function} [options.fetchImpl] injected fetch (Node tests)
    * @param {string[]} [options.openErrors]
    */
   constructor(options) {
@@ -126,6 +262,7 @@ export class LatticeService {
     this.#clock = options.clock ?? { now: () => new Date() };
     this.#newId = options.idFactory ?? createIdFactory();
     this.#uuid = options.uuid ?? (() => globalThis.crypto.randomUUID());
+    this.#fetchImpl = options.fetchImpl ?? globalThis.fetch;
     this.#openErrors = Array.isArray(options.openErrors) ? options.openErrors.slice(0, 6) : [];
   }
 
@@ -148,6 +285,7 @@ export class LatticeService {
       const parsed = parseJsonl(jsonl);
       this.#seedErrors = parsed.errors.slice(0, 5);
       if (parsed.events.length > 0) this.#insertRaw(parsed.events);
+      this.#seedCoverage(seed.coverageJson);
     }
 
     const storedDeviceId = this.#getMeta('deviceId');
@@ -247,6 +385,7 @@ export class LatticeService {
       digest: render.digest,
       counts: render.counts,
       eventCount: this.#eventCount(),
+      coverageCount: this.#coverageCount(),
       calibration: report,
       reportText: formatReport(report),
       openErrors: this.#openErrors,
@@ -355,11 +494,237 @@ export class LatticeService {
     return { added, errors };
   }
 
+  // -------------------------------------------------------------------------
+  // Extraction (M1a): model text -> preview -> confirmed events
+  // -------------------------------------------------------------------------
+
+  /**
+   * Runs normalize → extract → identify → deterministic merge and returns a
+   * *preview plan*. Nothing is written here: the page owns the plan, the user
+   * checks/edits it, and only `commitExtraction` appends events.
+   *
+   * A coverage hit short-circuits before any model call, unless `force` is set
+   * ("仍然重新抽取"): coverage is a cache, not a lock.
+   */
+  async extractPreview(input = {}) {
+    const source = this.#normalizeInput(input);
+    const force = Boolean(input.force);
+
+    if (!force) {
+      const coverage = this.#coverageView(this.#coverageRow(source.sourceHash));
+      if (coverage) {
+        return {
+          coverageHit: true,
+          extractedAt: coverage.extractedAt,
+          propositionCount: coverage.propositionCount,
+          chainCount: coverage.chainCount,
+          model: coverage.model,
+          promptVersion: coverage.promptVersion,
+          source,
+        };
+      }
+    }
+
+    const provider = normalizeProvider(input.provider);
+    const llm = createLlmPort(provider, { fetchImpl: this.#fetchImpl });
+    const extraction = await extractCandidate(source, { llm });
+
+    const state = this.#ensureState();
+    const existing = activePropositions(state).map((p) => ({
+      id: p.id,
+      statement: p.statement,
+      aliases: p.aliases ?? [],
+    }));
+    const identity = await resolveIdentity(extraction.candidate, existing, { llm });
+    const plan = buildMergePlan(extraction.candidate, identity, {
+      existingChainKeys: this.#existingChainKeys(),
+      minChainStrength: 0,
+    });
+
+    // Display-only mirror of the candidate (plain JSON: the Map from
+    // resolveIdentity must never cross the worker/page boundary).
+    const propositions = extraction.candidate.propositions.map((proposition) => ({
+      ref: proposition.ref,
+      statement: proposition.statement,
+      ...(proposition.name ? { name: proposition.name } : {}),
+      ...(proposition.aliases ? { aliases: proposition.aliases } : {}),
+      ...(proposition.quote ? { quote: proposition.quote } : {}),
+      existingId: identity.decisions.get(proposition.ref)?.existingId ?? null,
+    }));
+
+    return {
+      coverageHit: false,
+      source,
+      plan,
+      propositions,
+      promptVersion: extraction.promptVersion,
+      identityPromptVersion: identity.promptVersion,
+      identityUnresolved: identity.unresolved,
+      providerLabel: formatProviderLabel(provider),
+      model: provider.model,
+    };
+  }
+
+  /**
+   * Appends the (filtered) preview plan as events + records coverage, in ONE
+   * transaction. Idempotency has three independent guards:
+   *   1. coverage row for the same sourceHash -> no-op (unless `force`);
+   *   2. propositions whose statement already exists -> reused, not duplicated;
+   *   3. chains already implied by existing chains -> dropped.
+   * So committing the same plan twice (or re-extracting covered text) cannot
+   * duplicate the graph.
+   */
+  commitExtraction(input = {}) {
+    const sourceInput = input.source && typeof input.source === 'object' ? input.source : {};
+    const source = this.#normalizeInput(sourceInput);
+    const force = Boolean(input.force);
+
+    const existingCoverage = this.#coverageView(this.#coverageRow(source.sourceHash));
+    if (existingCoverage && !force) {
+      return {
+        committed: false,
+        alreadyCovered: true,
+        source,
+        counts: { propositions: 0, reused: 0, cues: 0, chains: 0, events: 0 },
+        coverage: existingCoverage,
+      };
+    }
+
+    const rawPlan = normalizePlan(input.plan);
+    const state = this.#ensureState();
+    const active = activePropositions(state);
+    const activeIds = new Set(active.map((p) => p.id));
+    const byStatement = new Map();
+    for (const proposition of active) byStatement.set(normalizeStatement(proposition.statement), proposition.id);
+
+    // Guard 2: an identical statement is the same proposition, even when the
+    // model re-extracted it under a new ref (no coverage row, e.g. re-extract).
+    const refToExisting = new Map();
+    for (const entry of rawPlan.create) {
+      const existingId = byStatement.get(normalizeStatement(entry.statement));
+      if (existingId) refToExisting.set(entry.ref, existingId);
+    }
+
+    const create = rawPlan.create.filter((entry) => !refToExisting.has(entry.ref));
+    const createRefs = new Set(create.map((entry) => entry.ref));
+    const knownIds = new Map(); // ref -> existing id, for reuse + dedupe checks
+    const reuse = [];
+    for (const entry of rawPlan.reuse) {
+      if (refToExisting.has(entry.ref)) continue;
+      if (!activeIds.has(entry.existingId)) continue; // stale preview / cleared data
+      reuse.push(entry);
+      knownIds.set(entry.ref, entry.existingId);
+    }
+    for (const [ref, existingId] of refToExisting) {
+      reuse.push({ ref, existingId });
+      knownIds.set(ref, existingId);
+    }
+
+    // Cues are generated per candidate proposition; a reused one already has its
+    // cue, so only newly created propositions get a new cue.
+    const cues = rawPlan.cues.filter((cue) => createRefs.has(cue.ref));
+
+    // Guard 3: drop chains that reference removed refs or already exist.
+    const existingChainKeys = this.#existingChainKeys();
+    const chains = rawPlan.chains.filter((chain) => {
+      const refs = [...chain.premiseRefs, chain.conclusionRef];
+      if (refs.some((ref) => !knownIds.has(ref) && !createRefs.has(ref))) return false;
+      if (refs.every((ref) => knownIds.has(ref))) {
+        const ids = refs.map((ref) => knownIds.get(ref));
+        const conclusionId = ids[ids.length - 1];
+        const premiseIds = ids.slice(0, -1);
+        if (existingChainKeys.has(chainKey(premiseIds, conclusionId))) return false;
+      }
+      return true;
+    });
+
+    const plan = { create, reuse, cues, chains, dropped: [] };
+    const providerLabel = cleanText(input.providerLabel);
+    const model = cleanText(input.model) || modelFromLabel(providerLabel);
+    const promptVersion = cleanText(input.promptVersion);
+    const actor = model || providerLabel ? `llm:${model || providerLabel}@${promptVersion || 'unknown'}` : 'system';
+
+    const factory = this.#newFactory();
+    const built = planToEvents(plan, { factory, newId: this.#newId, source, actor });
+    this.#seq = factory.seq;
+
+    const counts = {
+      propositions: built.events.filter((event) => event.type === 'proposition.asserted').length,
+      reused: reuse.length,
+      cues: built.events.filter((event) => event.type === 'cue.asserted').length,
+      chains: built.events.filter((event) => event.type === 'chain.asserted').length,
+      events: built.events.length,
+    };
+    const coverage = {
+      sourceHash: source.sourceHash,
+      title: source.title ?? null,
+      sourceUri: source.sourceUri ?? null,
+      sourceKind: source.sourceKind,
+      extractedAt: source.capturedAt,
+      propositionCount: create.length + reuse.length,
+      chainCount: counts.chains,
+      model: model || null,
+      promptVersion: promptVersion || null,
+    };
+
+    // ONE transaction: all events + meta.seq + the coverage row.
+    this.#append(built.events, () => this.#upsertCoverage(coverage));
+
+    return {
+      committed: built.events.length > 0,
+      alreadyCovered: false,
+      source,
+      counts,
+      coverage: this.#coverageView(this.#coverageRow(source.sourceHash)),
+    };
+  }
+
+  /** Coverage lookup by normalized hash (or by raw text, normalized here). */
+  coverageCheck(input = {}) {
+    let hash = cleanText(input.hash);
+    if (!hash && typeof input.text === 'string') {
+      try {
+        hash = normalizeSource({ text: input.text }).sourceHash;
+      } catch {
+        hash = '';
+      }
+    }
+    const coverage = hash ? this.#coverageView(this.#coverageRow(hash)) : null;
+    return { hit: Boolean(coverage), coverage };
+  }
+
+  /** Tiny graph stats for the diagnostics dialog. */
+  graphSummary() {
+    const state = this.#ensureState();
+    const active = activePropositions(state);
+    const edges = prerequisiteEdges(state);
+    const withPrereq = new Set(edges.map((edge) => edge.to)).size;
+    let mastered = 0;
+    for (const proposition of active) {
+      const mastery = state.mastery[proposition.id];
+      if (mastery && masterySummary(mastery).mean >= MASTERED_MEAN) mastered += 1;
+    }
+    return {
+      propositions: active.length,
+      chains: Object.keys(state.chains).length,
+      foundation: foundationPropositions(state).length,
+      withPrereq,
+      mastered,
+    };
+  }
+
+  /** One tiny chat completion; returns latency + model echo or a Chinese error. */
+  async providerTest(input = {}) {
+    const provider = normalizeProvider(input.provider);
+    return testProvider(provider, { fetchImpl: this.#fetchImpl });
+  }
+
   /** Hard delete of the whole log, keeping the device id. */
   async clear() {
     this.#db.exec('BEGIN');
     try {
       this.#db.exec('DELETE FROM events');
+      this.#db.exec('DELETE FROM coverage');
       this.#db.exec("DELETE FROM meta WHERE key <> 'deviceId'");
       this.#db.exec('COMMIT');
     } catch (err) {
@@ -385,6 +750,109 @@ export class LatticeService {
   // -------------------------------------------------------------------------
   // Internals
   // -------------------------------------------------------------------------
+
+  /** normalizeSource, but takes whatever the page sent and keeps dates sane. */
+  #normalizeInput(input) {
+    const raw = input && typeof input === 'object' ? input : {};
+    const title = cleanText(raw.title);
+    const sourceUri = cleanText(raw.sourceUri);
+    const capturedAt = isIsoDate(raw.capturedAt) ? raw.capturedAt : undefined;
+    return normalizeSource({
+      text: typeof raw.text === 'string' ? raw.text : '',
+      sourceKind: sourceKindOf(raw.sourceKind),
+      ...(title ? { title } : {}),
+      ...(sourceUri ? { sourceUri } : {}),
+      ...(capturedAt ? { capturedAt } : {}),
+    });
+  }
+
+  #coverageRow(hash) {
+    if (!hash) return null;
+    return this.#db.get(SELECT_COVERAGE_ONE_SQL, [hash]) ?? null;
+  }
+
+  #coverageView(row) {
+    if (!row) return null;
+    return {
+      sourceHash: row.source_hash,
+      title: row.title ?? null,
+      sourceUri: row.source_uri ?? null,
+      sourceKind: row.source_kind ?? null,
+      extractedAt: row.extracted_at ?? null,
+      propositionCount: Number(row.proposition_count) || 0,
+      chainCount: Number(row.chain_count) || 0,
+      model: row.model ?? null,
+      promptVersion: row.prompt_version ?? null,
+    };
+  }
+
+  #allCoverage() {
+    return this.#db.all(SELECT_COVERAGE_SQL).map((row) => this.#coverageView(row));
+  }
+
+  #upsertCoverage(row) {
+    this.#db.run(UPSERT_COVERAGE_SQL, [
+      row.sourceHash,
+      row.title,
+      row.sourceUri,
+      row.sourceKind,
+      row.extractedAt,
+      row.propositionCount,
+      row.chainCount,
+      row.model,
+      row.promptVersion,
+    ]);
+  }
+
+  /** Coverage rows travel with the JSONL mirror, so fallback mode stays idempotent. */
+  #seedCoverage(coverageJson) {
+    if (typeof coverageJson !== 'string' || coverageJson.trim().length === 0) return;
+    let rows;
+    try {
+      rows = JSON.parse(coverageJson);
+    } catch {
+      return;
+    }
+    if (!Array.isArray(rows) || rows.length === 0) return;
+    this.#db.exec('BEGIN');
+    try {
+      for (const row of rows) {
+        if (!row || typeof row !== 'object') continue;
+        const sourceHash = cleanText(row.sourceHash);
+        if (!sourceHash) continue;
+        this.#upsertCoverage({
+          sourceHash,
+          title: cleanText(row.title) || null,
+          sourceUri: cleanText(row.sourceUri) || null,
+          sourceKind: sourceKindOf(row.sourceKind),
+          extractedAt: isIsoDate(row.extractedAt) ? row.extractedAt : this.#clock.now().toISOString(),
+          propositionCount: Number(row.propositionCount) || 0,
+          chainCount: Number(row.chainCount) || 0,
+          model: cleanText(row.model) || null,
+          promptVersion: cleanText(row.promptVersion) || null,
+        });
+      }
+      this.#db.exec('COMMIT');
+    } catch (err) {
+      try {
+        this.#db.exec('ROLLBACK');
+      } catch {
+        /* ignore */
+      }
+      this.#openErrors = [...this.#openErrors, `覆盖记录读取失败：${err && err.message ? err.message : String(err)}`];
+    }
+  }
+
+  #existingChainKeys() {
+    const state = this.#ensureState();
+    const keys = new Set();
+    for (const chain of Object.values(state.chains)) keys.add(chainKey(chain.premiseIds, chain.conclusionId));
+    return keys;
+  }
+
+  #coverageCount() {
+    return Number(this.#db.value('SELECT COUNT(*) AS n FROM coverage')) || 0;
+  }
 
   #queueView(state, item, nowIso) {
     const proposition = state.propositions[item.propositionId];
@@ -417,12 +885,16 @@ export class LatticeService {
     });
   }
 
-  /** One transaction: events first, then meta.seq, then COMMIT. */
-  #append(events) {
-    if (events.length === 0) return;
+  /**
+   * ONE transaction: events, then meta.seq, then COMMIT. `extra` lets a caller
+   * (commitExtraction) add its auxiliary ledger write to the same transaction.
+   */
+  #append(events, extra = null) {
+    if (events.length === 0 && typeof extra !== 'function') return;
     this.#db.exec('BEGIN');
     try {
       for (const event of events) this.#insertEvent(event);
+      if (typeof extra === 'function') extra();
       this.#setMeta('seq', String(this.#seq));
       this.#db.exec('COMMIT');
     } catch (err) {
@@ -505,6 +977,7 @@ export class LatticeService {
       deviceId: this.#deviceId,
       seq: this.#seq,
       jsonl: exportEventsJsonl(this.#ensureEvents()),
+      coverageJson: JSON.stringify(this.#allCoverage()),
     };
   }
 

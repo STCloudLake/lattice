@@ -108,6 +108,20 @@ check('worker data-layer smoke test', () => {
   return `digest ${m[1]}`;
 });
 
+check('extension bundle exports the extraction API', () => {
+  const out = run(NODE, [
+    '--input-type=module',
+    '-e',
+    "import('./packages/extension/vendor/lattice-core/index.js').then(m => { " +
+      "const need = ['normalizeSource','extractCandidate','resolveIdentity','buildMergePlan','planToEvents','assertChain','prerequisiteEdges']; " +
+      "const missing = need.filter(k => typeof m[k] !== 'function'); " +
+      "if (missing.length) { console.error('missing: ' + missing.join(',')); process.exit(1); } " +
+      "console.log('ok'); })",
+  ]);
+  if (!out.includes('ok')) throw new Error('bundle missing exports');
+  return '7 exports';
+});
+
 check('CLI round-trip: import -> replay -> export -> replay', () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'lattice-verify-'));
   try {
@@ -132,6 +146,40 @@ check('CLI round-trip: import -> replay -> export -> replay', () => {
   }
 });
 
+check('chain events survive replay + doctor', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'lattice-chain-'));
+  try {
+    const eventsPath = path.join(dir, 'chain.jsonl');
+    const build = [
+      "import { assertChain, assertProposition, createEventFactory, exportJsonl } from '@lattice/core';",
+      "import { writeFileSync } from 'node:fs';",
+      "let n = 0; const newId = () => 'e' + String(++n).padStart(3, '0');",
+      "const f = createEventFactory({ deviceId: 'verify', newId, now: () => new Date('2026-11-24T00:00:00.000Z') });",
+      "const a = assertProposition(f, newId, { statement: '前提 A。' });",
+      "const b = assertProposition(f, newId, { statement: '前提 B。' });",
+      "const c = assertProposition(f, newId, { statement: '结论 C。' });",
+      "const k = assertChain(f, newId, { premiseIds: [a.propositionId, b.propositionId], conclusionId: c.propositionId, strength: 0.7 });",
+      "writeFileSync(process.argv[1], exportJsonl([a.event, b.event, c.event, k.event]));",
+    ].join('\n');
+    run(NODE, ['--input-type=module', '-e', build, eventsPath]);
+    const report = JSON.parse(run(NODE, [TSX, 'packages/cli/src/cli.ts', 'replay', '--in', eventsPath, '--json']));
+    if (report.chainCount !== 1) throw new Error(`chainCount=${report.chainCount}`);
+    if (report.prerequisiteEdgeCount !== 2) throw new Error(`prereqEdges=${report.prerequisiteEdgeCount}`);
+    const doc = run(NODE, [TSX, 'packages/cli/src/cli.ts', 'doctor', '--in', eventsPath, '--json']);
+    if (!JSON.parse(doc).ok) throw new Error('doctor reported problems');
+    return `chain=1, prereq=2`;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+check('extraction capture smoke test', () => {
+  const out = run(process.execPath, ['packages/extension/test/capture-smoke.mjs']);
+  if (!out.includes('CAPTURE SMOKE OK')) throw new Error('capture smoke did not report OK');
+  const m = out.match(/digest ([0-9a-f]+)/);
+  return m ? `digest ${m[1]}` : 'ok';
+});
+
 if (withE2e) {
   check('real MV3 browser E2E', () => {
     const out = run(process.execPath, ['packages/extension/test/extension-e2e.mjs'], { timeout: 240_000 });
@@ -143,7 +191,7 @@ if (withE2e) {
 
 // ---------------------------------------------------------------------------
 const pad = Math.max(...results.map((r) => r.name.length));
-console.log('\nM0 acceptance\n' + '─'.repeat(pad + 24));
+console.log('\nM1a acceptance\n' + '─'.repeat(pad + 24));
 for (const r of results) {
   console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name.padEnd(pad)}  ${r.detail}`);
 }

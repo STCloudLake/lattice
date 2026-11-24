@@ -8,10 +8,12 @@
  * burst import is one write.
  *
  * The event log is the source of truth, so storing it verbatim is enough to
- * rebuild every projection on the next start.
+ * rebuild every projection on the next start. The coverage ledger (a cache that
+ * says "this source text was already extracted") is mirrored alongside it so a
+ * restart in fallback mode does not re-ask the model for the same text.
  */
 
-export const STORAGE_KEYS = ['latticeDeviceId', 'latticeSeq', 'latticeEventsJsonl'];
+export const STORAGE_KEYS = ['latticeDeviceId', 'latticeSeq', 'latticeEventsJsonl', 'latticeCoverage'];
 
 /**
  * @param {{get: (keys: string[]) => Promise<object>, set: (items: object) => Promise<void>}} area
@@ -35,10 +37,13 @@ export function createStoragePersistence(area, options = {}) {
         deviceId: typeof got.latticeDeviceId === 'string' ? got.latticeDeviceId : undefined,
         seq: Number.isFinite(seq) && seq >= 0 ? seq : 0,
         jsonl: typeof got.latticeEventsJsonl === 'string' ? got.latticeEventsJsonl : '',
+        // Coverage is not an event, but mirroring it keeps fallback-mode capture
+        // idempotent across restarts (it is derivable, so losing it is not fatal).
+        coverageJson: typeof got.latticeCoverage === 'string' ? got.latticeCoverage : '[]',
       };
     } catch (err) {
       console.error('[Lattice] chrome.storage.local 读取失败，按空日志启动', err);
-      return { jsonl: '' };
+      return { jsonl: '', coverageJson: '[]' };
     }
   }
 
@@ -49,6 +54,7 @@ export function createStoragePersistence(area, options = {}) {
           latticeDeviceId: record.deviceId,
           latticeSeq: record.seq,
           latticeEventsJsonl: record.jsonl,
+          latticeCoverage: record.coverageJson ?? '[]',
         }),
       )
       .catch((err) => {

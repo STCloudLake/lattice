@@ -10,7 +10,11 @@
  *   <- { type: 'lattice-rpc-result', id, ok: true,  result }
  *   <- { type: 'lattice-rpc-result', id, ok: false, error }
  *
- * There is no timer, no network, and no background work in M0.
+ * There is no background timer and no background work. M1a adds exactly one
+ * outbound capability: when the page asks for an extraction (or a provider
+ * test), this worker POSTs to the user-configured OpenAI-compatible endpoint
+ * with its own 60s AbortController timeout. The API key arrives per call and is
+ * never stored here.
  */
 
 import sqlite3InitModule from '../vendor/sqlite-wasm/index.mjs';
@@ -76,10 +80,27 @@ const OPS = {
   clear: (service) => service.clear(),
   diagnostics: (service) => service.diagnostics(),
   flush: (service) => service.flush(),
+  // M1a: extraction. All of the model call happens here (the page never talks
+  // to the provider); the page only receives plain-JSON plans.
+  extractPreview: (service, args) => service.extractPreview(args),
+  commitExtraction: (service, args) => service.commitExtraction(args),
+  providerTest: (service, args) => service.providerTest(args),
+  coverageCheck: (service, args) => service.coverageCheck(args),
+  graphSummary: (service) => service.graphSummary(),
 };
 
 function post(message) {
   self.postMessage({ type: RPC_RESULT, ...message });
+}
+
+/** Extraction errors carry validation issues; surface up to 3 without a stack. */
+function errorIssues(err) {
+  const issues = err && Array.isArray(err.issues) ? err.issues : [];
+  return issues.slice(0, 3).map((issue) => ({
+    severity: issue && issue.severity === 'warning' ? 'warning' : 'error',
+    path: issue && typeof issue.path === 'string' ? issue.path : '',
+    message: issue && typeof issue.message === 'string' ? issue.message : String(issue),
+  }));
 }
 
 self.addEventListener('message', (event) => {
@@ -96,7 +117,8 @@ self.addEventListener('message', (event) => {
       post({ id, ok: true, result });
     } catch (err) {
       console.error(`[Lattice] RPC ${String(op)} 失败`, err);
-      post({ id, ok: false, error: errorText(err) });
+      const issues = errorIssues(err);
+      post({ id, ok: false, error: errorText(err), ...(issues.length > 0 ? { issues } : {}) });
     }
   })();
 });
