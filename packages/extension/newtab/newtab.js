@@ -20,6 +20,23 @@ import {
   planNextGeneration,
   saveCurriculumState,
 } from './curriculum-guard.js';
+// Shared push-layer contract (classic script, imported for its side effect):
+// keys, billboard snapshot shape, interruption budget, exposure queue. The
+// sidebar/background load the same file as a classic script, so there is exactly
+// one definition of "what counts as an interruption".
+import '../shared/billboard.js';
+
+const PushShared = globalThis.LatticeBillboard;
+const DEFAULT_INTERRUPT_SETTINGS = PushShared
+  ? PushShared.normalizeInterruptSettings(null)
+  : {
+      dailyLimit: 1,
+      quietStart: '23:00',
+      quietEnd: '08:00',
+      sidebar: true,
+      notifications: false,
+      sites: { bilibili: true, youtube: true },
+    };
 
 const SAMPLE_PACK_URL = new URL('../data/sample-pack.json', import.meta.url);
 const RPC_REQUEST = 'lattice-rpc';
@@ -89,6 +106,7 @@ const els = {
   feedDoneDetail: $('feed-done-detail'),
   feedDomain: $('feed-domain'),
   feedReason: $('feed-reason'),
+  feedDifficulty: $('feed-difficulty'),
   feedStatement: $('feed-statement'),
   feedCue: $('feed-cue'),
   feedMeta: $('feed-meta'),
@@ -161,6 +179,13 @@ const els = {
   setDevice: $('set-device'),
   setSeq: $('set-seq'),
   setDigest: $('set-digest'),
+  interruptQuietStart: $('interrupt-quiet-start'),
+  interruptQuietEnd: $('interrupt-quiet-end'),
+  interruptSidebar: $('interrupt-sidebar'),
+  interruptSiteBilibili: $('interrupt-site-bilibili'),
+  interruptSiteYoutube: $('interrupt-site-youtube'),
+  interruptNotifications: $('interrupt-notifications'),
+  interruptStatus: $('interrupt-status'),
   btnSettingsClose: $('btn-settings-close'),
 
   // 兴趣领域: declared interests are events in the C ledger, this section is a view.
@@ -225,6 +250,9 @@ const state = {
   captureSourceUri: '',
   captureSettings: { autoCommit: true },
   feedSettings: { dose: DEFAULT_FEED_DOSE },
+  // M2b: interruption budget settings (sidebar + notifications share one limit).
+  interruptSettings: DEFAULT_INTERRUPT_SETTINGS,
+  interruptState: null,
   silentCapture: false,
   payload: null,
   card: null,
@@ -419,6 +447,182 @@ function onFeedDoseChange(dose) {
   toast(`每日剂量已设为 ${next} 条`);
   if (state.surface === 'feed' && state.payload && !state.payload.empty) {
     void refreshFeedAndPaint();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Interruptions (M2b)
+//
+// The page owns the settings form; the sidebar content script and the background
+// worker read the same chrome.storage.local keys, so there is exactly one budget
+// for sidebar + system notifications. This page is also the only context that can
+// reach the feed worker, so it publishes the `latticeBillboard` snapshot those
+// surfaces render from and drains their queued exposures on boot.
+// ---------------------------------------------------------------------------
+
+function interruptFormState() {
+  const checkedLimit = document.querySelector('input[name="interrupt-limit"]:checked');
+  const base = state.interruptSettings;
+  return PushShared.normalizeInterruptSettings({
+    dailyLimit: checkedLimit ? Number(checkedLimit.value) : base.dailyLimit,
+    quietStart: els.interruptQuietStart ? els.interruptQuietStart.value : base.quietStart,
+    quietEnd: els.interruptQuietEnd ? els.interruptQuietEnd.value : base.quietEnd,
+    sidebar: els.interruptSidebar ? els.interruptSidebar.checked : base.sidebar,
+    notifications: els.interruptNotifications ? els.interruptNotifications.checked : base.notifications,
+    sites: {
+      bilibili: els.interruptSiteBilibili ? els.interruptSiteBilibili.checked : base.sites.bilibili,
+      youtube: els.interruptSiteYoutube ? els.interruptSiteYoutube.checked : base.sites.youtube,
+    },
+  });
+}
+
+function paintInterruptStatus() {
+  if (!els.interruptStatus) return;
+  const settings = state.interruptSettings;
+  const quiet = settings.quietStart === settings.quietEnd ? '未启用' : `${settings.quietStart}–${settings.quietEnd}`;
+  els.interruptStatus.textContent = `每日打扰上限 ${settings.dailyLimit} 次 · 安静时段 ${quiet} · 侧栏 ${
+    settings.sidebar ? '开' : '关'
+  } · 通知 ${settings.notifications ? '开' : '关'}`;
+  els.interruptStatus.hidden = false;
+}
+
+function fillInterruptForm() {
+  const settings = state.interruptSettings;
+  for (const radio of document.querySelectorAll('input[name="interrupt-limit"]')) {
+    radio.checked = Number(radio.value) === settings.dailyLimit;
+  }
+  if (els.interruptQuietStart) els.interruptQuietStart.value = settings.quietStart;
+  if (els.interruptQuietEnd) els.interruptQuietEnd.value = settings.quietEnd;
+  if (els.interruptSidebar) els.interruptSidebar.checked = settings.sidebar;
+  if (els.interruptSiteBilibili) els.interruptSiteBilibili.checked = settings.sites.bilibili;
+  if (els.interruptSiteYoutube) els.interruptSiteYoutube.checked = settings.sites.youtube;
+  if (els.interruptNotifications) els.interruptNotifications.checked = settings.notifications;
+  paintInterruptStatus();
+}
+
+async function loadInterruptSettings() {
+  const area = storageArea();
+  if (!area || !PushShared) return;
+  try {
+    state.interruptSettings = PushShared.normalizeInterruptSettings(
+      await PushShared.readKey(area, PushShared.KEYS.interruptSettings, null),
+    );
+  } catch {
+    /* defaults are fine; settings must never block boot */
+  }
+}
+
+async function persistInterruptSettings() {
+  const area = storageArea();
+  if (!area || !PushShared) return;
+  const saved = await PushShared.writeKey(area, PushShared.KEYS.interruptSettings, state.interruptSettings);
+  if (!saved) toast('保存设置失败');
+}
+
+function onInterruptSettingsChanged() {
+  state.interruptSettings = interruptFormState();
+  void persistInterruptSettings();
+  paintInterruptStatus();
+  toast('打扰设置已保存');
+}
+
+function pushDay() {
+  return PushShared ? PushShared.dayOf(new Date()) : new Date().toISOString().slice(0, 10);
+}
+
+/** Publishes the current feed for the sidebar/notifications to render from. */
+function publishBillboard(feed) {
+  const area = storageArea();
+  if (!area || !PushShared) return;
+  const items = (Array.isArray(feed.items) ? feed.items : [])
+    .map((item) =>
+      PushShared.normalizeSnapshotItem({
+        propositionId: item.propositionId,
+        cueId: item.cueId,
+        statement: item.statement,
+        domain: item.domain,
+        reason: item.reason,
+        tier: item.tier,
+        cognitive: item.cognitive,
+        mastery: item.mastery && typeof item.mastery === 'object' ? item.mastery.mean : item.mastery,
+        retrievability: item.retrievability,
+        score: item.score,
+      }),
+    )
+    .filter(Boolean);
+  const snapshot = {
+    day: feed.todayDate || pushDay(),
+    dose: feed.dose ?? state.feedSettings.dose,
+    refreshedAt: new Date().toISOString(),
+    items,
+  };
+  void PushShared.writeKey(area, PushShared.KEYS.billboard, snapshot);
+}
+
+/**
+ * Drains sidebar/notification exposures into the event log. The queue records
+ * carry their own ids and the worker's insert is INSERT OR IGNORE, so a crash
+ * between append and cleanup cannot double-count attention.
+ */
+async function drainPendingExposureQueue() {
+  const area = storageArea();
+  if (!area || !PushShared) return null;
+  const queue = await PushShared.readExposureQueue(area).catch(() => []);
+  if (!Array.isArray(queue) || queue.length === 0) return null;
+  try {
+    const result = await rpc('drainExposures', { exposures: queue, dose: state.feedSettings.dose });
+    const drained = new Set(queue.map((entry) => entry.id));
+    const current = await PushShared.readExposureQueue(area).catch(() => []);
+    await PushShared.writeKey(
+      area,
+      PushShared.KEYS.exposureQueue,
+      current.filter((entry) => !drained.has(entry.id)),
+    );
+    return result;
+  } catch (err) {
+    console.error('[Lattice] 曝光队列入库失败', err);
+    return null;
+  }
+}
+
+async function drainAndRefreshOnVisible() {
+  const result = await drainPendingExposureQueue();
+  if (!result) return;
+  await refresh().catch(() => {});
+  if (state.surface === 'feed' && state.payload && !state.payload.empty) {
+    state.feed.items = [];
+    void refreshFeedAndPaint();
+  }
+}
+
+/** 清空数据 also resets the push caches owned by this page. */
+async function clearPushCaches() {
+  const area = storageArea();
+  if (!area || !PushShared) return;
+  const now = new Date();
+  const day = PushShared.dayOf(now);
+  try {
+    await area.set({
+      [PushShared.KEYS.billboard]: { day, dose: state.feedSettings.dose, refreshedAt: now.toISOString(), items: [] },
+      [PushShared.KEYS.exposureQueue]: [],
+      [PushShared.KEYS.shownGuard]: { day, ids: [] },
+      [PushShared.KEYS.interruptState]: { day, used: 0 },
+      [PushShared.KEYS.notifyDay]: null,
+    });
+  } catch {
+    /* caches are rebuildable; never block clearing the real data */
+  }
+}
+
+async function readInterruptSnapshot() {
+  const area = storageArea();
+  if (!area || !PushShared) return null;
+  try {
+    const context = await PushShared.readInterruptContext(area, new Date());
+    const queue = await PushShared.readExposureQueue(area).catch(() => []);
+    return { ...context, pending: queue.length };
+  } catch {
+    return null;
   }
 }
 
@@ -888,6 +1092,7 @@ async function boot() {
     await loadProviderConfig();
     await loadCaptureSettings();
     await loadFeedSettings();
+    await loadInterruptSettings();
     const init = await rpc('init');
     if (init.storage === 'fallback') {
       const detail = init.persisted ? 'chrome.storage 持久化' : '仅内存（未检测到 chrome.storage）';
@@ -904,6 +1109,9 @@ async function boot() {
         toast(`入门内容载入失败：${err.message}`, 5600);
       }
     }
+    // M2b: sidebar/notification exposures were queued while this page was away;
+    // drain them BEFORE reading the feed so today's already-shown cards stay out.
+    await drainPendingExposureQueue();
     await refresh();
     await consumePendingCapture();
     await refreshCurriculumMeta();
@@ -1038,6 +1246,8 @@ function applyFeedResult(result) {
   state.feed.items = Array.isArray(feed.items) ? feed.items : [];
   state.feed.interests = Array.isArray(feed.interests) ? feed.interests : [];
   if (typeof feed.todayDate === 'string' && feed.todayDate.length > 0) state.feed.today = feed.todayDate;
+  // Cache the billboard for the sidebar + notification surfaces (M2b).
+  publishBillboard(feed);
 }
 
 async function refreshFeedAndPaint() {
@@ -1089,6 +1299,13 @@ function paintFeedCard(item) {
   const domain = typeof item.domain === 'string' ? item.domain : '';
   els.feedDomain.textContent = domain;
   els.feedDomain.hidden = domain.length === 0;
+  // ★ tier + cognitive label (M2b difficulty contract; both fields optional).
+  const difficulty = PushShared ? PushShared.describeDifficulty(item) : null;
+  els.feedDifficulty.textContent = difficulty ? difficulty.text : '';
+  els.feedDifficulty.hidden = !difficulty;
+  els.feedDifficulty.title = difficulty && difficulty.label ? `难度 · ${difficulty.label}` : '难度';
+  els.feedDifficulty.dataset.tier = item.tier ? String(item.tier) : '';
+  els.feedDifficulty.dataset.cognitive = item.cognitive || '';
   els.feedStatement.textContent = item.statement || '（这条命题没有正文）';
   const cue = typeof item.cueFront === 'string' ? item.cueFront.trim() : '';
   els.feedCue.textContent = cue && cue !== item.statement ? `想一想：${cue}` : '';
@@ -1431,6 +1648,16 @@ function formatDiagnostics(info, graph) {
       } · 跳过 ${feed.skipped ?? 0} · 兴趣 ${interests}`,
     );
   }
+  if (info.interrupt) {
+    const settings = info.interrupt.settings || state.interruptSettings;
+    const used = info.interrupt.state ? Number(info.interrupt.state.used) || 0 : 0;
+    const quiet = settings.quietStart === settings.quietEnd ? '未启用' : `${settings.quietStart}–${settings.quietEnd}`;
+    lines.push(
+      `打扰: 上限 ${settings.dailyLimit} 次 · 今日已用 ${used} · 安静 ${quiet} · 侧栏 ${
+        settings.sidebar ? '开' : '关'
+      } · 通知 ${settings.notifications ? '开' : '关'} · 待入库曝光 ${Number(info.interrupt.pending) || 0} 条`,
+    );
+  }
   if (info.curriculum) {
     // M2c: the declared side (who the system is preparing for) and the work queue.
     const declaredInterests = Array.isArray(info.curriculum.interests)
@@ -1498,13 +1725,15 @@ async function openDiagnostics() {
   els.diagText.textContent = '正在读取…';
   openDialog(els.dialogDiagnostics);
   try {
-    const [info, graph, backgroundLine] = await Promise.all([
+    const [info, graph, backgroundLine, interrupt] = await Promise.all([
       rpc('diagnostics', { dose: state.feedSettings.dose }),
       rpc('graphSummary').catch(() => null),
       backgroundHealthLine(),
+      readInterruptSnapshot(),
     ]);
     state.diagnostics = info;
     if (backgroundLine) info.backgroundLine = backgroundLine;
+    if (interrupt) info.interrupt = interrupt;
     els.diagText.textContent = formatDiagnostics(info, graph);
   } catch (err) {
     els.diagText.textContent = `诊断失败：${err.message}`;
@@ -1527,6 +1756,7 @@ function openSettings() {
   for (const radio of document.querySelectorAll('input[name="feed-dose"]')) {
     radio.checked = Number(radio.value) === state.feedSettings.dose;
   }
+  fillInterruptForm();
   fillProviderForm();
   setInterestStatus('');
   openDialog(els.dialogSettings);
@@ -1579,6 +1809,7 @@ async function clearAll() {
         /* best effort: losing the guard only allows one extra generation */
       }
     }
+    await clearPushCaches();
     paintFeedHint('');
     await refresh();
     toast('已清空全部本地数据');
@@ -2176,6 +2407,23 @@ function wire() {
       if (radio.checked) onFeedDoseChange(radio.value);
     });
   }
+  // M2b interruption settings: radio limit + quiet hours + sidebar/site/notification toggles.
+  for (const radio of document.querySelectorAll('input[name="interrupt-limit"]')) {
+    radio.addEventListener('change', () => {
+      if (radio.checked) onInterruptSettingsChanged();
+    });
+  }
+  for (const input of [els.interruptQuietStart, els.interruptQuietEnd]) {
+    if (input) input.addEventListener('change', onInterruptSettingsChanged);
+  }
+  for (const input of [
+    els.interruptSidebar,
+    els.interruptSiteBilibili,
+    els.interruptSiteYoutube,
+    els.interruptNotifications,
+  ]) {
+    if (input) input.addEventListener('change', onInterruptSettingsChanged);
+  }
   els.providerPreset.addEventListener('change', onProviderPresetChange);
   els.btnProviderSave.addEventListener('click', onProviderSave);
   els.btnProviderModels.addEventListener('click', () => void onProviderFetchModels());
@@ -2296,6 +2544,9 @@ function wire() {
   window.addEventListener('pagehide', () => void flushPersistence());
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') void flushPersistence();
+    // Back on the newtab: sidebar/notification attention queued while we were
+    // away is drained into the event log, then the feed is refreshed.
+    else void drainAndRefreshOnVisible();
   });
 }
 

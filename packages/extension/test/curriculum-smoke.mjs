@@ -332,17 +332,17 @@ async function main() {
     assert.equal(interference.declared, true);
     assert.equal(interference.level, 'beginner');
   });
-  check('生成内容带 domain 与「session」来源，actor = llm:stub-model@curriculum-v1', () => {
+  check('生成内容带 domain 与「session」来源，actor = llm:stub-model@curriculum-v2', () => {
     const { eventList } = eventTypesOf(service);
     const generatedProps = eventList.filter(
       (event) =>
         event.type === 'proposition.asserted' &&
-        event.actor === 'llm:stub-model@curriculum-v1' &&
+        event.actor === 'llm:stub-model@curriculum-v2' &&
         event.payload.domain === '数学',
     );
     assert.equal(generatedProps.length, 6);
     assert.equal(
-      eventList.filter((event) => event.type === 'chain.asserted' && event.actor === 'llm:stub-model@curriculum-v1').length,
+      eventList.filter((event) => event.type === 'chain.asserted' && event.actor === 'llm:stub-model@curriculum-v2').length,
       1,
     );
   });

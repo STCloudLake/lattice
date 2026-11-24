@@ -112,6 +112,18 @@ const STUB_CURRICULUM = {
 async function startStubProvider() {
   const requests = [];
   const server = createServer((req, res) => {
+    // M2b sidebar test: serve a fake video-site page. The browser maps
+    // www.bilibili.com to 127.0.0.1 via --host-resolver-rules, so navigating to
+    // http://www.bilibili.com:<port>/fake-bilibili really loads this response and
+    // the manifest content script runs on a real bilibili.com origin.
+    if (req.method === 'GET' && String(req.url ?? '').startsWith('/fake-bilibili')) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(
+        '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>B站测试页</title></head>' +
+          '<body><h1>fake bilibili page</h1><p>用于验证 Lattice 侧栏 content script。</p></body></html>',
+      );
+      return;
+    }
     // Deliberately no CORS / CORP headers: the real DeepSeek/OpenAI APIs do not
     // send them either. The manifest `host_permissions` are what let the
     // extension worker call the endpoint — this E2E proves exactly that path.
@@ -254,10 +266,21 @@ async function readFeedCard(harness) {
     source: document.getElementById("feed-source").textContent,
     domain: document.getElementById("feed-domain").textContent,
     reason: document.getElementById("feed-reason").textContent,
+    difficulty: document.getElementById("feed-difficulty").hidden ? "" : document.getElementById("feed-difficulty").textContent,
     remaining: Number(document.getElementById("feed-card").dataset.remaining) || 0,
   })`);
-  card.summary = `[${card.reason}] ${card.statement} · ${card.meta} · ${card.source}`;
+  card.summary = `[${card.reason}] ${card.statement} · ${card.meta} · ${card.source} · ${card.difficulty || '(无难度)'}`;
   return card;
+}
+
+/** Reads one chrome.storage.local key as JSON from an extension page. */
+async function readStorageJson(harness, key) {
+  const raw = await harness.eval(
+    `chrome.storage.local.get(${JSON.stringify(key)}).then((got) => { const value = got[${JSON.stringify(
+      key,
+    )}]; return JSON.stringify(value === undefined ? null : value); })`,
+  );
+  return JSON.parse(String(raw));
 }
 
 /** "共 14 命题" -> 14 */
@@ -309,6 +332,19 @@ function createHarness(page) {
       }
       throw new Error(`等待条件超时：${label}`);
     },
+    /** Like waitFor, but the expression may resolve a Promise (chrome.storage). */
+    async waitForAsync(expression, label, timeoutMs = 20000) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        try {
+          if (await this.eval(`(${expression})`)) return true;
+        } catch {
+          /* page might be navigating */
+        }
+        await sleep(120);
+      }
+      throw new Error(`等待条件超时：${label}`);
+    },
     async key(key, code, keyCode) {
       const base = { key, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode };
       await page.send('Input.dispatchKeyEvent', { type: 'keyDown', ...base });
@@ -330,6 +366,12 @@ async function main() {
       '--no-default-browser-check',
       '--disable-sync',
       '--window-size=1280,900',
+      // M2b: make www.bilibili.com resolve to the local stub server, so the
+      // declarative sidebar content script runs on a real bilibili.com origin.
+      // --no-proxy-server keeps a system proxy from resolving the host itself.
+      '--host-resolver-rules=MAP www.bilibili.com 127.0.0.1',
+      '--no-proxy-server',
+      '--disable-features=HttpsUpgrades,HttpsFirstModeV2',
       `--user-data-dir=${profileDir}`,
       `--disable-extensions-except=${extensionDir}`,
       `--load-extension=${extensionDir}`,
@@ -437,6 +479,7 @@ async function main() {
     assert.match(firstFeed.reason, /基础|前沿|复习/);
     assert.match(firstFeed.meta, /掌握 \d+% · R \d+%/);
     assert.match(firstFeed.source, /^来自「.+」$/);
+    assert.match(firstFeed.difficulty, /^[★☆]{5} (记忆|理解|应用|分析|评价)$/, 'seed 内容应带难度星级 + 认知标签');
     assert.ok(firstFeed.remaining >= 1 && firstFeed.remaining <= 3, '今日剩余条数应在剂量内');
     assert.equal(stub.requests.length, 0, '首次运行不配置模型也必须有内容');
     const seenFeedIds = new Set([firstFeed.id]);
@@ -796,8 +839,150 @@ async function main() {
     await harness.eval('document.getElementById("btn-diag-close").click()');
 
     // -----------------------------------------------------------------------
-    // 8) reload: the event log (seed + generated + captured) must survive, and
-    //    today's already-shown cards must not be pushed again.
+    // 7b) M2b: interruption settings + the sidebar content script on a REAL
+    //     bilibili.com origin (host-resolver maps it to the local stub page).
+    // -----------------------------------------------------------------------
+    await harness.eval('document.getElementById("btn-settings").click()');
+    await harness.waitFor('document.getElementById("dialog-settings").open === true', '设置（打扰预算）');
+    const notificationsDefault = await harness.eval('document.getElementById("interrupt-notifications").checked');
+    console.log(`settings: 通知默认 ${notificationsDefault ? '开' : '关'}（应为关）`);
+    assert.equal(notificationsDefault, false, '系统通知默认必须关闭');
+    await harness.eval(`
+      (() => {
+        const limit = document.querySelector('input[name="interrupt-limit"][value="2"]');
+        limit.checked = true;
+        limit.dispatchEvent(new Event('change', { bubbles: true }));
+        const setValue = (id, value) => {
+          const element = document.getElementById(id);
+          element.value = value;
+          element.dispatchEvent(new Event('change', { bubbles: true }));
+        };
+        // start === end means "no quiet window", so this E2E does not depend on
+        // the wall-clock time it happens to run at.
+        setValue('interrupt-quiet-start', '00:00');
+        setValue('interrupt-quiet-end', '00:00');
+      })()
+    `);
+    await harness.waitForAsync(
+      `chrome.storage.local.get("latticeInterruptSettings").then((got) => {
+         const settings = got.latticeInterruptSettings || {};
+         return settings.dailyLimit === 2 && settings.quietStart === '00:00' &&
+           settings.quietEnd === '00:00' && settings.notifications === false && settings.sidebar === true;
+       })`,
+      '打扰设置写入 chrome.storage.local',
+    );
+    const storedInterrupt = await readStorageJson(harness, 'latticeInterruptSettings');
+    console.log(`settings: ${JSON.stringify(storedInterrupt)}`);
+    assert.equal(storedInterrupt.dailyLimit, 2);
+    assert.equal(storedInterrupt.notifications, false);
+    assert.equal(storedInterrupt.sidebar, true);
+    await harness.eval('document.getElementById("btn-settings-close").click()');
+    // Make sure the sidebar has a fresh billboard snapshot to read.
+    await harness.waitForAsync(
+      `chrome.storage.local.get("latticeBillboard").then((got) => {
+         const board = got.latticeBillboard || {};
+         return board.day === new Date().toISOString().slice(0, 10) && Array.isArray(board.items) && board.items.length >= 2;
+       })`,
+      '快照写入 chrome.storage.local',
+    );
+
+    const fakeBilibiliUrl = `http://www.bilibili.com:${stub.port}/fake-bilibili`;
+    const sidebarTarget = await fetch(`${BASE}/json/new?${encodeURIComponent('about:blank')}`, { method: 'PUT' }).then(
+      (response) => response.json(),
+    );
+    const sidebarPage = await Cdp.connect(sidebarTarget.webSocketDebuggerUrl);
+    const sidebarHarness = createHarness(sidebarPage);
+    sidebarPage.on('Runtime.consoleAPICalled', (params) => {
+      if (params.type !== 'error' && params.type !== 'warning') return;
+      consoleErrors.push(
+        `sidebar ${params.type}: ${params.args.map((arg) => arg.value ?? arg.description ?? '').join(' ')}`,
+      );
+    });
+    sidebarPage.on('Runtime.exceptionThrown', (params) => {
+      consoleErrors.push(`sidebar exception: ${params.exceptionDetails?.text ?? 'unknown'}`);
+    });
+    sidebarPage.on('Runtime.executionContextCreated', (params) => {
+      if (params.context.auxData?.isDefault) sidebarHarness.setContext(params.context.id);
+    });
+    await sidebarPage.send('Runtime.enable');
+    await sidebarPage.send('Page.enable');
+    await sleep(200);
+    // Navigate from the harness (not via /json/new) so the custom host mapping
+    // has a real load to apply to.
+    await sidebarPage.send('Page.navigate', { url: fakeBilibiliUrl });
+    await sidebarPage.send('Page.enable');
+    await sleep(500);
+    await sidebarHarness.waitFor('document.readyState === "complete"', 'bilibili 测试页 load');
+    await sidebarHarness.waitFor('document.getElementById("lattice-sidebar") !== null', '侧栏 content script 注入', 15000);
+    const sidebarState = await sidebarHarness.eval(`({
+      url: location.href,
+      items: document.querySelectorAll('#lattice-sidebar .lattice-item').length,
+      text: document.getElementById('lattice-sidebar').textContent,
+      difficulty: document.querySelectorAll('#lattice-sidebar .lattice-difficulty').length,
+    })`);
+    console.log(
+      `sidebar: ${sidebarState.url} · ${sidebarState.items} 条 · ${String(sidebarState.text).replace(/\s+/g, ' ').trim().slice(0, 40)}…`,
+    );
+    assert.match(sidebarState.url, /bilibili\.com/, '测试页应运行在 bilibili.com 源上');
+    assert.equal(sidebarState.items, 2, '侧栏最多显示 2 条');
+    assert.match(sidebarState.text, /知道了/);
+    assert.match(sidebarState.text, /不感兴趣/);
+    assert.ok(sidebarState.difficulty >= 1, '侧栏应渲染难度星级');
+    const queuedAfterRender = await readStorageJson(harness, 'latticePendingExposures');
+    assert.ok(
+      Array.isArray(queuedAfterRender) && queuedAfterRender.length === 2,
+      `侧栏 shown 应入队 2 条（实际 ${Array.isArray(queuedAfterRender) ? queuedAfterRender.length : 'null'}）`,
+    );
+    assert.ok(queuedAfterRender.every((entry) => entry.kind === 'shown' && entry.surface === 'sidebar'));
+    const sidebarShownIds = queuedAfterRender.map((entry) => entry.propositionId);
+    const sidebarKnowText = await sidebarHarness.eval(`(() => {
+      const button = document.querySelector('#lattice-sidebar .lattice-primary');
+      if (!button) return '';
+      button.click();
+      return button.textContent;
+    })()`);
+    await harness.waitForAsync(
+      `chrome.storage.local.get("latticePendingExposures").then((got) => {
+         const queue = got.latticePendingExposures || [];
+         return queue.some((entry) => entry.kind === 'engaged' && entry.surface === 'sidebar');
+       })`,
+      '侧栏「知道了」engaged 入队',
+    );
+    const queuedAfterKnow = await readStorageJson(harness, 'latticePendingExposures');
+    console.log(`sidebar: ${sidebarKnowText.trim()} -> queue ${queuedAfterKnow.length} 条`);
+    const engagedEntry = queuedAfterKnow.find((entry) => entry.kind === 'engaged');
+    assert.ok(engagedEntry, '应有 engaged 记录');
+    assert.equal(engagedEntry.propositionId, sidebarShownIds[0]);
+    const sidebarAfterKnow = await sidebarHarness.eval(`({
+      items: document.querySelectorAll('#lattice-sidebar .lattice-item').length,
+      hasPanel: document.getElementById('lattice-sidebar') !== null,
+    })`);
+    assert.equal(sidebarAfterKnow.hasPanel, true);
+    assert.equal(sidebarAfterKnow.items, 1, '知道了之后应推进到剩下的 1 条');
+    const sidebarSkipText = await sidebarHarness.eval(`(() => {
+      const buttons = Array.from(document.querySelectorAll('#lattice-sidebar button'));
+      const button = buttons.find((entry) => entry.textContent.trim() === '不感兴趣');
+      if (!button) return '';
+      button.click();
+      return button.textContent;
+    })()`);
+    await harness.waitForAsync(
+      `chrome.storage.local.get("latticePendingExposures").then((got) => {
+         const queue = got.latticePendingExposures || [];
+         return queue.some((entry) => entry.kind === 'skipped' && entry.surface === 'sidebar');
+       })`,
+      '侧栏「不感兴趣」skipped 入队',
+    );
+    const queuedAfterSkip = await readStorageJson(harness, 'latticePendingExposures');
+    console.log(`sidebar: ${String(sidebarSkipText).trim()} -> queue ${queuedAfterSkip.length} 条（尚未 drain）`);
+    assert.equal(queuedAfterSkip.length, 4);
+    await fetch(`${BASE}/json/close/${sidebarTarget.id}`).catch(() => {});
+    sidebarPage.close();
+
+    // -----------------------------------------------------------------------
+    // 8) reload: the event log (seed + generated + captured) must survive, today's
+    //    already-shown cards must not be pushed again, and the browser-side
+    //    exposure queue must be drained into the log on boot.
     // -----------------------------------------------------------------------
     await pageClient.send('Page.reload', { ignoreCache: true });
     await harness.waitFor('document.readyState === "complete"', 'reload');
@@ -815,6 +1000,30 @@ async function main() {
       'reload 后推送视图',
     );
     console.log(`reload:  ${afterReload}（seed 不重复执行）`);
+    // The sidebar queued 4 exposures (2 shown + engaged + skipped); boot drains them.
+    await harness.waitForAsync(
+      `chrome.storage.local.get("latticePendingExposures").then((got) => {
+         const queue = got.latticePendingExposures || [];
+         return queue.length === 0;
+       })`,
+      '启动时把侧栏曝光队列 drain 进事件日志',
+    );
+    await harness.eval('document.getElementById("btn-diagnostics").click()');
+    await harness.waitFor('document.getElementById("diag-text").textContent.includes("打扰:")', '诊断打扰行');
+    const diagFeedAfterSidebar = await diagLine(harness, '推送:');
+    const diagInterruptAfterSidebar = await diagLine(harness, '打扰:');
+    console.log(`diag:    ${diagFeedAfterSidebar.trim()}`);
+    console.log(`diag:    ${diagInterruptAfterSidebar.trim()}`);
+    assert.match(
+      diagFeedAfterSidebar,
+      /参与 3 · 跳过 2/,
+      '侧栏的 engaged/skipped 应已 drain 进 C 账',
+    );
+    assert.match(
+      diagInterruptAfterSidebar,
+      /^打扰: 上限 2 次 · 今日已用 1 · 安静 未启用 · 侧栏 开 · 通知 关 · 待入库曝光 0 条/,
+    );
+    await harness.eval('document.getElementById("btn-diag-close").click()');
 
     // -----------------------------------------------------------------------
     // 9) exhaust the feed: the empty state is "今天的知识看完了 ✓" with a review entry
@@ -887,7 +1096,7 @@ async function main() {
     }
     assert.equal(realErrors.length, 0, `页面出现 ${realErrors.length} 条 console 错误`);
     console.log('console: 无错误 / 无 CSP 违规');
-    console.log('\nE2E OK: 首次运行 seed、声明兴趣、自动准备内容、复习、捕获、持久化全部通过');
+    console.log('\nE2E OK: 首次运行 seed、声明兴趣、自动准备内容、复习、捕获、推送、侧栏打扰预算、持久化全部通过');
   } finally {
     pageClient?.close();
     browser.kill();

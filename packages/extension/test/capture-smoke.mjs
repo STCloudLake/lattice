@@ -338,7 +338,7 @@ async function main() {
     assert.equal(preview.propositions[0].existingId, null);
     assert.equal(preview.providerLabel, 'stub-model (local)');
     assert.equal(preview.model, 'stub-model');
-    assert.equal(preview.promptVersion, 'extract-v1');
+    assert.equal(preview.promptVersion, 'extract-v2');
   });
   check('页面边界上只有 JSON（没有 Map / 类实例）', () => {
     const roundTripped = JSON.parse(JSON.stringify(preview));
@@ -382,7 +382,7 @@ async function main() {
   check('事件由 llm:<model>@<promptVersion> 写出', () => {
     const parsed = parseJsonl(exportedAfterCommit.text).events;
     const propositionEvent = parsed.find((event) => event.type === 'proposition.asserted');
-    assert.equal(propositionEvent.actor, 'llm:stub-model@extract-v1');
+    assert.equal(propositionEvent.actor, 'llm:stub-model@extract-v2');
   });
   check('导出的事件日志不含 API Key', () => assert.doesNotMatch(exportedAfterCommit.text, new RegExp(SECRET_KEY)));
 

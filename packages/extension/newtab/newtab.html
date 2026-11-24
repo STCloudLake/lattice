@@ -52,6 +52,7 @@
             <div class="feed-badges">
               <span class="badge badge-domain" id="feed-domain" hidden></span>
               <span class="badge badge-reason" id="feed-reason" data-reason="foundation">基础</span>
+              <span class="badge badge-difficulty" id="feed-difficulty" hidden></span>
             </div>
             <p class="feed-statement" id="feed-statement"></p>
             <p class="feed-cue muted" id="feed-cue" hidden></p>
@@ -238,6 +239,56 @@
             <input type="radio" name="feed-dose" value="10" />
             10 条
           </label>
+          <hr class="divider" />
+          <p class="hint muted">
+            打扰预算：侧栏和系统通知共用。用完后当天不再主动打扰（新标签页推送不算打扰）。
+          </p>
+          <label class="radio">
+            <input type="radio" name="interrupt-limit" value="0" />
+            0 次（完全静默）
+          </label>
+          <label class="radio">
+            <input type="radio" name="interrupt-limit" value="1" checked />
+            1 次（默认，保守）
+          </label>
+          <label class="radio">
+            <input type="radio" name="interrupt-limit" value="2" />
+            2 次
+          </label>
+          <label class="radio">
+            <input type="radio" name="interrupt-limit" value="3" />
+            3 次
+          </label>
+          <div class="time-row">
+            <label class="field">
+              <span>安静时段开始</span>
+              <input type="time" id="interrupt-quiet-start" value="23:00" />
+            </label>
+            <label class="field">
+              <span>安静时段结束</span>
+              <input type="time" id="interrupt-quiet-end" value="08:00" />
+            </label>
+          </div>
+          <p class="hint muted">开始与结束相同 = 不启用安静时段。</p>
+          <label class="radio">
+            <input type="checkbox" id="interrupt-sidebar" checked />
+            在视频网站显示侧栏
+          </label>
+          <div class="site-toggles">
+            <label class="radio">
+              <input type="checkbox" id="interrupt-site-bilibili" checked />
+              B 站（bilibili.com）
+            </label>
+            <label class="radio">
+              <input type="checkbox" id="interrupt-site-youtube" checked />
+              YouTube
+            </label>
+          </div>
+          <label class="radio">
+            <input type="checkbox" id="interrupt-notifications" />
+            允许系统通知（默认关闭；每天最多 1 条，与侧栏共用预算）
+          </label>
+          <p class="hint muted" id="interrupt-status" hidden></p>
         </fieldset>
         <fieldset class="fieldset">
           <legend>出题模式</legend>

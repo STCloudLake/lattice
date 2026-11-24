@@ -92,7 +92,7 @@ const SEED_INTERESTS = [
 /** meta key proving the bundled pack was imported (idempotency, cleared by clear()). */
 const SEED_CURRICULUM_META = 'seedCurriculumSeeded';
 const SEED_CURRICULUM_URL = 'data/seed-curriculum.json';
-const CURRICULUM_PROMPT_VERSION = 'curriculum-v1';
+const CURRICULUM_PROMPT_VERSION = 'curriculum-v2';
 const LEVELS = new Set(['beginner', 'intermediate', 'advanced']);
 
 /** C-ledger attention events. They never touch mastery or the schedule. */
@@ -502,6 +502,50 @@ export class LatticeService {
     this.#seq = factory.seq;
     this.#append([event]);
     return { ok: true, feed: this.feed({ dose: input?.dose, now }) };
+  }
+
+  /**
+   * Drains the sidebar / notification exposure queue that content scripts keep in
+   * chrome.storage.local (they cannot reach SQLite). The page hands the plain
+   * records here on boot.
+   *
+   * Idempotent by construction: the record's own `id` is reused as the event id
+   * and the event log insert is `INSERT OR IGNORE`, so draining the same queue
+   * twice (crash between append and storage cleanup) cannot double-count.
+   * Unknown propositions (cleared data / stale snapshot) are skipped silently.
+   */
+  drainExposures(input = {}) {
+    const list = Array.isArray(input?.exposures) ? input.exposures.slice(0, 500) : [];
+    const state = this.#ensureState();
+    const events = [];
+    if (list.length > 0) {
+      const factory = this.#newFactory();
+      for (const raw of list) {
+        if (!raw || typeof raw !== 'object') continue;
+        const propositionId = String(raw.propositionId ?? '').trim();
+        const kind = String(raw.kind ?? '').trim();
+        if (!propositionId || !EXPOSURE_KINDS.has(kind)) continue;
+        if (!state.propositions[propositionId]) continue; // stale queue entry
+        const at = isIsoDate(raw.at) ? new Date(raw.at).toISOString() : this.#clock.now().toISOString();
+        const day = typeof raw.day === 'string' && raw.day.length === 10 ? raw.day : dayOf(at);
+        const surface = cleanText(raw.surface).slice(0, 40) || 'sidebar';
+        const opts = { at, actor: 'system' };
+        let event;
+        if (kind === 'shown') {
+          event = exposureShown(factory, { propositionId, surface, day }, opts);
+        } else if (kind === 'engaged') {
+          event = exposureEngaged(factory, { propositionId, surface }, opts);
+        } else {
+          event = exposureSkipped(factory, { propositionId, surface }, opts);
+        }
+        const recordId = cleanText(raw.id);
+        if (recordId) event.id = recordId.slice(0, 80); // idempotency key
+        events.push(event);
+      }
+      this.#seq = factory.seq;
+    }
+    this.#append(events);
+    return { ok: true, recorded: events.length, feed: this.feed({ dose: input?.dose }) };
   }
 
   diagnostics(input = {}) {
@@ -1285,6 +1329,14 @@ export class LatticeService {
       view.cueBack = cue?.back ?? '';
     }
     if (item.domain) view.domain = item.domain;
+    // Difficulty is knowledge-ledger data (extract-v2 / curriculum-v2); pass it
+    // through when present so the feed card, sidebar and notifications can show
+    // ★ stars + a cognitive label. Old logs simply have no difficulty.
+    const difficulty = proposition?.difficulty;
+    const tier = difficulty && Number.isFinite(Number(difficulty.tier)) ? Number(difficulty.tier) : item.tier;
+    if (Number.isFinite(Number(tier))) view.tier = Number(tier);
+    const cognitive = (difficulty && difficulty.cognitive) || item.cognitive;
+    if (typeof cognitive === 'string' && cognitive.length > 0) view.cognitive = cognitive;
     return view;
   }
 

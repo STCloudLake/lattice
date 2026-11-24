@@ -329,3 +329,21 @@ label.field input[type="password"] {
 .feed-loading { margin: 0; }
 .feed-hint { margin: 0; }
 .feed-done { min-height: 0; }
+
+/* ---- difficulty (M2b): ★ tier + cognitive label ---------------------- */
+
+.badge-difficulty {
+  color: var(--hard); border-color: var(--hard);
+  letter-spacing: 0.04em; font-variant-numeric: tabular-nums;
+}
+
+/* ---- interruption settings (M2b) ------------------------------------- */
+
+.time-row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+.time-row .field { flex: 1 1 120px; }
+input[type="time"] {
+  font: inherit; font-size: 13.5px; color: var(--text);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+  padding: 9px 10px; width: 100%;
+}
+.site-toggles { display: flex; gap: 16px; flex-wrap: wrap; }

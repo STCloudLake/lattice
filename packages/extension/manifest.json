@@ -1,9 +1,17 @@
 {
   "manifest_version": 3,
   "name": "Lattice (M0)",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "An inspectable learner model — M0 skeleton",
-  "permissions": ["storage", "unlimitedStorage", "activeTab", "scripting", "contextMenus"],
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "activeTab",
+    "scripting",
+    "contextMenus",
+    "alarms",
+    "notifications"
+  ],
   "host_permissions": [
     "https://api.deepseek.com/*",
     "https://api.openai.com/*",
@@ -20,6 +28,14 @@
   "action": {
     "default_title": "Lattice"
   },
+  "content_scripts": [
+    {
+      "matches": ["*://*.bilibili.com/*", "*://*.youtube.com/*"],
+      "js": ["shared/billboard.js", "content/sidebar.js"],
+      "css": ["content/sidebar.css"],
+      "run_at": "document_idle"
+    }
+  ],
   "minimum_chrome_version": "120",
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"

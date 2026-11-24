@@ -2,7 +2,7 @@
 
 **An inspectable learner model for ambient learning.** Local-first, open source (Apache-2.0), no account, no telemetry.
 
-> Status: **M2c** — declare the domains you care about (defaults: 计算机 / 人工智能) and Lattice prepares and pushes content at your level: a bundled beginner curriculum seeds the graph on first run, then the system generates the next prerequisite-ordered batch when a domain runs thin. Capture a page and it counts as interest evidence. Delivery is ad-like (small daily dose, know it / not interested / test me), and exposure never inflates mastery. Sidebar/notification surfaces and held-back counterfactuals are still ahead. See [docs/m2-feed.md](docs/m2-feed.md) and [docs/m0-report.md](docs/m0-report.md).
+> Status: **M2b** — knowledge arrives like an ad: a small daily dose in the new tab, plus a sidebar on bilibili/YouTube and opt-in notifications, all sharing an interruption budget (0–3/day, quiet hours, per-site toggles). Every knowledge point carries a two-axis grade (★1–5 difficulty + cognitive operation) so content is paced to the learner's declared level; exposure is tracked in the context ledger and never inflates mastery. Next: held-back counterfactuals and delayed quizzes (measured push lift). See [docs/m2-feed.md](docs/m2-feed.md), [docs/difficulty.md](docs/difficulty.md), [docs/m0-report.md](docs/m0-report.md).
 
 Lattice keeps four separate ledgers about a learner and never mixes them:
 
@@ -79,7 +79,8 @@ docs/                  design, storage decision, data format, M0 report, product
 
 ## Design docs
 
-- [docs/m2-feed.md](docs/m2-feed.md) — the ad-like push layer (interest → dose → feed)
+- [docs/m2-feed.md](docs/m2-feed.md) — the ad-like push layer (interest → dose → feed → sidebar/notifications)
+- [docs/difficulty.md](docs/difficulty.md) — two-axis knowledge difficulty (★1–5 + cognitive) and how the feed paces by it
 - [docs/design.md](docs/design.md) — architecture and the four-ledger model
 - [docs/product-report.md](docs/product-report.md) — feature baseline for v1.0 (58 features, M0–M3)
 - [docs/user-manual.md](docs/user-manual.md) — user manual (v1.0)

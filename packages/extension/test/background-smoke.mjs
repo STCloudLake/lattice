@@ -14,6 +14,9 @@ import vm from 'node:vm';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(path.join(here, '../background.js'), 'utf8');
+// background.js loads the shared push-layer contract via importScripts(); emulate
+// that in the vm so the classic script can be evaluated outside a service worker.
+const sharedSource = readFileSync(path.join(here, '../shared/billboard.js'), 'utf8');
 
 let failures = 0;
 async function check(name, fn) {
@@ -63,7 +66,19 @@ function createEnv({ extraction, tab } = {}) {
         return [{ result: extraction }];
       },
     },
-    storage: { local: { set: async (items) => Object.assign(storage, items) } },
+    storage: {
+      local: {
+        async get(keys) {
+          const wanted = Array.isArray(keys) ? keys : [keys];
+          const out = {};
+          for (const key of wanted) if (Object.prototype.hasOwnProperty.call(storage, key)) out[key] = storage[key];
+          return out;
+        },
+        async set(items) {
+          Object.assign(storage, items);
+        },
+      },
+    },
     tabs: {
       create: async (options) => {
         createdTabs.push(options);
@@ -72,7 +87,19 @@ function createEnv({ extraction, tab } = {}) {
     },
   };
 
-  const context = vm.createContext({ chrome, console, setTimeout, clearTimeout });
+  const context = vm.createContext({
+    chrome,
+    console,
+    setTimeout,
+    clearTimeout,
+    importScripts(file) {
+      if (String(file).endsWith('shared/billboard.js')) {
+        vm.runInContext(sharedSource, context, { filename: 'shared/billboard.js' });
+        return;
+      }
+      throw new Error('unexpected importScripts: ' + String(file));
+    },
+  });
   vm.runInContext(source, context, { filename: 'background.js' });
   return {
     listeners,
