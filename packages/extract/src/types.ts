@@ -1,4 +1,4 @@
-import type { Id, ProvenanceRef } from '@lattice/core';
+import type { Difficulty, Id, ProvenanceRef } from '@lattice/core';
 
 export interface LlmMessage {
   role: 'system' | 'user' | 'assistant';
@@ -37,6 +37,8 @@ export interface ExtractedProposition {
   aliases?: string[];
   /** Short verbatim quote from the source. Required by the prompt, not by the schema. */
   quote?: string;
+  /** ★1–5 acquisition difficulty + cognitive operation. */
+  difficulty?: Difficulty;
 }
 
 export interface ExtractedChain {
@@ -89,6 +91,7 @@ export interface MergePlan {
     name?: string;
     aliases: string[];
     quote?: string;
+    difficulty?: Difficulty;
   }>;
   reuse: Array<{ ref: string; existingId: Id }>;
   cues: Array<{ ref: string; front: string; back: string; kind: 'recall' }>;

@@ -5,9 +5,9 @@ import type { ExistingProposition, ExtractedProposition, LlmMessage, NormalizedS
  * version travels with the events' actor (`llm:<model>@<promptVersion>`) and can
  * be compared in the coverage ledger.
  */
-export const EXTRACT_PROMPT_VERSION = 'extract-v1';
+export const EXTRACT_PROMPT_VERSION = 'extract-v2';
 export const IDENTIFY_PROMPT_VERSION = 'identify-v1';
-export const CURRICULUM_PROMPT_VERSION = 'curriculum-v1';
+export const CURRICULUM_PROMPT_VERSION = 'curriculum-v2';
 
 export const EXTRACT_SYSTEM = `你是知识抽取器。把给定文本拆成「命题」和「推理链」。
 
@@ -19,6 +19,10 @@ export const EXTRACT_SYSTEM = `你是知识抽取器。把给定文本拆成「�
    支持时才输出链。前提多于一个时，它们是合起来起作用，不是各自单独推出结论。
 4. 不要引入原文没有的知识。不要输出重复命题。没有可学内容时输出空数组。
 5. 命题数量控制在 3–12 条之间（文本很短时可以更少）。用原文的语言书写。
+6. 给每个命题标注 difficulty：{"tier":1-5,"cognitive":"remember|understand|apply|analyze|evaluate","minutes":整数}。
+   tier 衡量「没有先修时掌握它有多难」，不是重要性：
+   1=术语/单点事实；2=概念关系/为什么；3=多步应用/条件判断；4=推导/边界与反例；5=评价/跨领域综合。
+   cognitive 是它要求的认知操作。minutes 是首次理解所需的大致分钟数（1–120）。
 
 还要给出这段材料所属的「领域」（domain）：2–8 个字的名词，例如「经济学」「认知心理学」「分布式系统」。
 这是用来判断用户兴趣的，不是题目分类，尽量稳定（同类材料用同一个词）。
@@ -27,7 +31,7 @@ export const EXTRACT_SYSTEM = `你是知识抽取器。把给定文本拆成「�
 {
   "domain": "领域名",
   "propositions": [
-    {"ref":"p1","statement":"完整的陈述句","name":"短标签（可选）","aliases":["同义说法"],"quote":"原文逐字片段"}
+    {"ref":"p1","statement":"完整的陈述句","name":"短标签（可选）","aliases":["同义说法"],"quote":"原文逐字片段","difficulty":{"tier":2,"cognitive":"understand","minutes":8}}
   ],
   "chains": [
     {"premises":["p1","p2"],"conclusion":"p3","strength":0.8}
@@ -93,6 +97,9 @@ export const CURRICULUM_SYSTEM = `你是一个课程设计者。给定领域与�
 3. 不要引入领域外的知识，不要写练习或题目，只给命题与推理链。
 4. 数量控制在要求范围内；先易后难；每个命题都要能被理解，不需要额外背景。
 5. 全部用中文书写。
+6. 每个命题都要有 difficulty：{"tier":1-5,"cognitive":"remember|understand|apply|analyze|evaluate","minutes":整数}。
+   1=术语/单点事实；2=概念关系；3=多步应用；4=推导/边界；5=评价/综合。
+   按给定水平选择 tier：入门对应 1–2，进阶对应 3，高级对应 4–5。
 
 只输出一个 JSON 对象：
 {

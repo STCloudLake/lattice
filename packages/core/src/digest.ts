@@ -18,8 +18,15 @@ export function stateDigest(state: LearnerState): string {
 
   const snapshot = {
     propositions: sortedBy(Object.values(state.propositions), (p) => p.id).map((p) => ({
-      ...p,
-      provenance: undefined, // provenance is source metadata, not learner state
+      id: p.id,
+      statement: p.statement,
+      name: p.name ?? null,
+      aliases: [...p.aliases].sort(),
+      domain: p.domain ?? null,
+      status: p.status,
+      mergedInto: p.mergedInto ?? null,
+      // provenance is source metadata, not learner state
+      difficulty: p.difficulty ?? null,
     })),
     cues: sortedBy(Object.values(state.cues), (c) => c.id),
     chains: sortedBy(Object.values(state.chains), (c) => c.id).map((c) => ({

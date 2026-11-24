@@ -3,7 +3,7 @@ import { isDue, retrievability } from './fsrs.js';
 import { masteryOf } from './mastery.js';
 import { pickCue } from './queue.js';
 import { activePropositions, exposureOf, transitivePrerequisites } from './replay.js';
-import type { DomainLevel, Id, ISODate, LearnerState } from './types.js';
+import type { CognitiveLevel, DomainLevel, Id, ISODate, LearnerState } from './types.js';
 
 /**
  * The push policy: what to show in the newtab feed today.
@@ -24,6 +24,9 @@ export interface FeedItem {
   reason: FeedReason;
   score: number;
   domain?: string;
+  /** ★1–5 acquisition difficulty, when the point has been graded. */
+  tier?: number;
+  cognitive?: CognitiveLevel;
 }
 
 export interface FeedOptions {
@@ -37,6 +40,26 @@ export interface FeedOptions {
   minPrereqMastery?: number;
   /** Set false for a pure-exposure feed that ignores the review schedule. */
   includeReviews?: boolean;
+  /** Fallback ★ target when the domain has no declared level. */
+  targetTier?: number;
+}
+
+/** Declared learner level -> the ★ tier the feed should aim at. */
+export function tierForLevel(level: DomainLevel): number {
+  if (level === 'advanced') return 4;
+  if (level === 'intermediate') return 3;
+  return 2;
+}
+
+function targetTierFor(state: LearnerState, domain: string | undefined, fallback: number): number {
+  if (!domain) return fallback;
+  const resolver = createDomainResolver(state.domainAliases);
+  const target = resolver(domain).trim().toLowerCase();
+  for (const interest of Object.values(state.interests)) {
+    if (!interest.declared) continue;
+    if (resolver(interest.name).trim().toLowerCase() === target) return tierForLevel(interest.level);
+  }
+  return fallback;
 }
 
 export interface CurriculumNeed {
@@ -161,6 +184,7 @@ export function buildFeed(state: LearnerState, options: FeedOptions): FeedItem[]
   const dose = Math.max(1, options.dose ?? 3);
   const reviewShare = Math.min(1, Math.max(0, options.reviewShare ?? 0.4));
   const minPrereqMastery = options.minPrereqMastery ?? 0.7;
+  const fallbackTier = options.targetTier ?? 3;
   const includeReviews = options.includeReviews !== false;
   const now = options.now;
   const today = dayOf(now);
@@ -202,8 +226,22 @@ export function buildFeed(state: LearnerState, options: FeedOptions): FeedItem[]
 
     const foundation = prerequisites.length === 0;
     const central = centrality.get(proposition.id) ?? 0;
-    const score = (0.6 * (1 - mastery) + 0.4 * central + (foundation ? 0.08 : 0)) * boost;
-    fresh.push({ ...base, kind: 'new', reason: foundation ? 'foundation' : 'frontier', score });
+    const targetTier = targetTierFor(state, proposition.domain, fallbackTier);
+    const difficulty = proposition.difficulty;
+    // Never push material two tiers above the learner's stage: an ad you cannot
+    // parse is noise. Unknown difficulty is treated as neutral, not easy.
+    if (difficulty && difficulty.tier > targetTier + 2) continue;
+    const levelFit = difficulty
+      ? 1 - Math.min(4, Math.abs(difficulty.tier - targetTier)) / 4
+      : 0.6;
+    const score =
+      (0.5 * (1 - mastery) + 0.3 * central + 0.12 * levelFit + (foundation ? 0.08 : 0)) * boost;
+    const item: FeedItem = { ...base, kind: 'new', reason: foundation ? 'foundation' : 'frontier', score };
+    if (difficulty) {
+      item.tier = difficulty.tier;
+      item.cognitive = difficulty.cognitive;
+    }
+    fresh.push(item);
   }
 
   reviews.sort(byScore);

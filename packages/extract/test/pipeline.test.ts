@@ -13,7 +13,9 @@ import {
   normalizeSource,
   planToEvents,
   generateCurriculum,
+  gradeDifficulty,
   resolveIdentity,
+  validateCandidateJson,
   type LlmPort,
   type LlmRequest,
 } from '../src/index.js';
@@ -97,7 +99,7 @@ describe('extractCandidate', () => {
     expect(result.candidate.domain).toBe('经济学');
     expect(result.candidate.propositions).toHaveLength(3);
     expect(result.candidate.chains).toHaveLength(1);
-    expect(result.promptVersion).toBe('extract-v1');
+    expect(result.promptVersion).toBe('extract-v2');
     expect(llm.calls).toHaveLength(1);
     expect(llm.calls[0]!.messages[0]!.content).toContain('知识抽取器');
   });
@@ -248,7 +250,7 @@ describe('generateCurriculum', () => {
     ]);
     const result = await generateCurriculum({ domain: '计算机', level: 'beginner', count: 2 }, { llm });
     expect(result.candidate.domain).toBe('计算机');
-    expect(result.promptVersion).toBe('curriculum-v1');
+    expect(result.promptVersion).toBe('curriculum-v2');
     expect(llm.calls[0]!.messages[0]!.content).toContain('课程设计者');
     expect(llm.calls[0]!.messages[1]!.content).toContain('计算机');
   });
@@ -258,5 +260,72 @@ describe('generateCurriculum', () => {
     await expect(generateCurriculum({ domain: '计算机', level: 'beginner' }, { llm })).rejects.toBeInstanceOf(
       ExtractionError,
     );
+  });
+});
+
+
+describe('difficulty grading', () => {
+  it('reads difficulty from extraction output', async () => {
+    const output = JSON.stringify({
+      domain: '计算机',
+      propositions: [
+        {
+          ref: 'p1',
+          statement: '一个需要应用的条件判断。',
+          quote: '原文',
+          difficulty: { tier: 3, cognitive: 'apply', minutes: 12 },
+        },
+      ],
+      chains: [],
+    });
+    const source = normalizeSource({ text: '测试文本' });
+    const { candidate } = await extractCandidate(source, { llm: fakeLlm([output]) });
+    expect(candidate.propositions[0]?.difficulty).toEqual({ tier: 3, cognitive: 'apply', minutes: 12 });
+  });
+
+  it('downgrades invalid tiers to tier 3 with a warning', async () => {
+    const output = JSON.stringify({
+      propositions: [{ ref: 'p1', statement: '一条足够长的命题。', difficulty: { tier: 9, cognitive: 'evaluate' } }],
+      chains: [],
+    });
+    const result = validateCandidateJson(JSON.parse(output));
+    expect(result.candidate?.propositions[0]?.difficulty?.tier).toBe(3);
+    expect(result.issues.some((issue) => issue.path.includes('tier'))).toBe(true);
+  });
+
+  it('asks the curriculum model for difficulty', async () => {
+    const llm = fakeLlm([
+      JSON.stringify({
+        domain: '计算机',
+        propositions: [{ ref: 'p1', statement: '课程命题。', difficulty: { tier: 2, cognitive: 'understand' } }],
+        chains: [],
+      }),
+    ]);
+    const result = await generateCurriculum({ domain: '计算机', level: 'beginner', count: 1 }, { llm });
+    expect(llm.calls[0]!.messages[0]!.content).toContain('difficulty');
+    expect(result.candidate.propositions[0]?.difficulty?.tier).toBe(2);
+  });
+
+  it('batch-grades existing points and reports dropped refs', async () => {
+    const llm = fakeLlm([
+      JSON.stringify({
+        grades: [
+          { ref: 'a', tier: 4, cognitive: 'analyze', minutes: 30, why: '需要推导边界' },
+          { ref: 'b', tier: 99, cognitive: 'remember' },
+        ],
+      }),
+    ]);
+    const result = await gradeDifficulty(
+      [
+        { ref: 'a', statement: '推导命题。' },
+        { ref: 'b', statement: '坏评分命题。' },
+        { ref: 'c', statement: '被模型漏掉的命题。' },
+      ],
+      { llm },
+    );
+    expect(result.promptVersion).toBe('grading-v1');
+    expect(result.grades).toHaveLength(1);
+    expect(result.grades[0]).toMatchObject({ ref: 'a', tier: 4, cognitive: 'analyze' });
+    expect(result.dropped).toEqual(expect.arrayContaining(['b', 'c']));
   });
 });

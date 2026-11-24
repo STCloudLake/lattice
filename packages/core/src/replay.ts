@@ -4,6 +4,7 @@ import { applyEvidence, emptyMastery, resetMastery } from './mastery.js';
 import type {
   Chain,
   Cue,
+  Difficulty,
   DomainLevel,
   ExposureState,
   Interest,
@@ -69,6 +70,26 @@ function asGrade(v: unknown): Grade | undefined {
   return undefined;
 }
 
+const COGNITIVE_LEVELS = new Set(['remember', 'understand', 'apply', 'analyze', 'evaluate']);
+
+function asDifficulty(v: unknown): Difficulty | undefined {
+  if (typeof v !== 'object' || v === null) return undefined;
+  const raw = v as Record<string, unknown>;
+  const tierRaw = raw['tier'];
+  const tier = typeof tierRaw === 'number' ? Math.round(tierRaw) : undefined;
+  if (tier === undefined || tier < 1 || tier > 5) return undefined;
+  const cognitiveRaw = raw['cognitive'];
+  const cognitive = typeof cognitiveRaw === 'string' && COGNITIVE_LEVELS.has(cognitiveRaw)
+    ? (cognitiveRaw as Difficulty['cognitive'])
+    : 'understand';
+  const minutesRaw = raw['minutes'];
+  const difficulty: Difficulty = { tier: tier as Difficulty['tier'], cognitive };
+  if (typeof minutesRaw === 'number' && minutesRaw > 0 && minutesRaw <= 600) {
+    difficulty.minutes = Math.round(minutesRaw);
+  }
+  return difficulty;
+}
+
 function asProvenance(v: unknown): ProvenanceRef[] {
   if (!Array.isArray(v)) return [];
   return v.filter(
@@ -120,6 +141,7 @@ function applyEvent(state: LearnerState, e: LatticeEvent): void {
         status: 'active',
         createdAt: e.occurredAt,
         provenance: asProvenance(e.payload['provenance']),
+        ...(asDifficulty(e.payload['difficulty']) ? { difficulty: asDifficulty(e.payload['difficulty']) } : {}),
       };
       const name = asString(e.payload['name']);
       if (name) proposition.name = name;
@@ -150,6 +172,7 @@ function applyEvent(state: LearnerState, e: LatticeEvent): void {
         strength,
         createdAt: e.occurredAt,
         provenance: asProvenance(e.payload['provenance']),
+        ...(asDifficulty(e.payload['difficulty']) ? { difficulty: asDifficulty(e.payload['difficulty']) } : {}),
       };
       return;
     }

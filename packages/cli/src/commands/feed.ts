@@ -23,6 +23,7 @@ interface FeedRow {
   kind: 'review' | 'new';
   reason: FeedReason;
   domain: string | null;
+  tier: number | null;
   mastery: number;
   retrievability: number | null;
   score: number;
@@ -55,6 +56,7 @@ function buildRows(state: LearnerState, at: string, dose: number): FeedRow[] {
       kind: item.kind,
       reason: item.reason,
       domain: item.domain ?? proposition?.domain ?? null,
+      tier: item.tier ?? proposition?.difficulty?.tier ?? null,
       mastery: masterySummary(mastery).mean,
       retrievability: schedule && schedule.reviewCount > 0 ? retrievability(schedule, at) : null,
       score: item.score,
@@ -122,6 +124,7 @@ export function runFeed(opts: CommandOptions, io: CliIO): number {
           { title: '命题', width: 34 },
           { title: '原因', width: 10 },
           { title: '领域', width: 10 },
+          { title: '★', width: 7 },
           { title: '掌握', width: 7 },
           { title: 'R', width: 7 },
           { title: '分数', width: 6 },
@@ -130,6 +133,7 @@ export function runFeed(opts: CommandOptions, io: CliIO): number {
           row.statement,
           REASON_LABEL[row.reason],
           row.domain ?? '—',
+          row.tier === null ? '—' : '★'.repeat(row.tier) + '☆'.repeat(5 - row.tier),
           pct(row.mastery),
           row.retrievability === null ? '—' : pct(row.retrievability),
           row.score.toFixed(2),

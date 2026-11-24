@@ -1,8 +1,9 @@
 import { fnv1a64 } from './ids.js';
 import type {
   Actor,
-  DomainLevel,
   CueKind,
+  Difficulty,
+  DomainLevel,
   EventType,
   Grade,
   Id,
@@ -72,6 +73,7 @@ export interface PropositionInput {
   name?: string;
   aliases?: string[];
   domain?: string;
+  difficulty?: Difficulty;
   provenance?: ProvenanceRef[];
   /** Pre-assigned id (used by importers that must stay stable). */
   id?: Id;
@@ -88,6 +90,7 @@ export function assertProposition(
   if (input.name !== undefined) payload.name = input.name;
   if (input.aliases !== undefined) payload.aliases = input.aliases;
   if (input.domain !== undefined) payload.domain = input.domain;
+  if (input.difficulty !== undefined) payload.difficulty = input.difficulty;
   if (input.provenance !== undefined) payload.provenance = input.provenance;
   return { propositionId, event: factory('proposition.asserted', propositionId, payload, opts) };
 }

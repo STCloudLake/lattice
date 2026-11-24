@@ -6,103 +6,264 @@
       "domain": "计算机",
       "statement": "算法是解决问题的有限步骤序列。",
       "name": "算法",
-      "cues": [{ "front": "算法是什么？", "back": "解决问题的有限步骤序列。" }]
+      "cues": [
+        {
+          "front": "算法是什么？",
+          "back": "解决问题的有限步骤序列。"
+        }
+      ],
+      "difficulty": {
+        "tier": 1,
+        "cognitive": "remember",
+        "minutes": 3
+      }
     },
     {
       "ref": "cs2",
       "domain": "计算机",
       "statement": "时间复杂度描述运行时间随输入规模增长的趋势。",
       "name": "时间复杂度",
-      "cues": [{ "front": "时间复杂度描述的是什么？", "back": "运行时间随输入规模增长的趋势。" }]
+      "cues": [
+        {
+          "front": "时间复杂度描述的是什么？",
+          "back": "运行时间随输入规模增长的趋势。"
+        }
+      ],
+      "difficulty": {
+        "tier": 2,
+        "cognitive": "understand",
+        "minutes": 8
+      }
     },
     {
       "ref": "cs3",
       "domain": "计算机",
       "statement": "二分查找要求数据有序。",
       "name": "二分查找的前提",
-      "cues": [{ "front": "二分查找对数据有什么要求？", "back": "数据必须有序。" }]
+      "cues": [
+        {
+          "front": "二分查找对数据有什么要求？",
+          "back": "数据必须有序。"
+        }
+      ],
+      "difficulty": {
+        "tier": 2,
+        "cognitive": "understand",
+        "minutes": 5
+      }
     },
     {
       "ref": "cs4",
       "domain": "计算机",
       "statement": "二分查找每次把搜索范围减半。",
       "name": "二分查找的过程",
-      "cues": [{ "front": "二分查找每一步做什么？", "back": "把搜索范围减半。" }]
+      "cues": [
+        {
+          "front": "二分查找每一步做什么？",
+          "back": "把搜索范围减半。"
+        }
+      ],
+      "difficulty": {
+        "tier": 2,
+        "cognitive": "understand",
+        "minutes": 5
+      }
     },
     {
       "ref": "cs5",
       "domain": "计算机",
       "statement": "二分查找的时间复杂度是 O(log n)。",
       "name": "二分查找的复杂度",
-      "cues": [{ "front": "二分查找的时间复杂度是多少？", "back": "O(log n)。" }]
+      "cues": [
+        {
+          "front": "二分查找的时间复杂度是多少？",
+          "back": "O(log n)。"
+        }
+      ],
+      "difficulty": {
+        "tier": 3,
+        "cognitive": "apply",
+        "minutes": 12
+      }
     },
     {
       "ref": "cs6",
       "domain": "计算机",
       "statement": "哈希表用额外的空间换取平均 O(1) 的查找时间。",
       "name": "哈希表",
-      "cues": [{ "front": "哈希表为什么查找快？", "back": "用额外空间换取平均 O(1) 的查找。" }]
+      "cues": [
+        {
+          "front": "哈希表为什么查找快？",
+          "back": "用额外空间换取平均 O(1) 的查找。"
+        }
+      ],
+      "difficulty": {
+        "tier": 2,
+        "cognitive": "understand",
+        "minutes": 8
+      }
     },
     {
       "ref": "cs7",
       "domain": "计算机",
       "statement": "递归函数必须有基准情形，否则会无限递归。",
       "name": "递归的基准情形",
-      "cues": [{ "front": "递归函数为什么需要基准情形？", "back": "否则会无限递归。" }]
+      "cues": [
+        {
+          "front": "递归函数为什么需要基准情形？",
+          "back": "否则会无限递归。"
+        }
+      ],
+      "difficulty": {
+        "tier": 2,
+        "cognitive": "understand",
+        "minutes": 6
+      }
     },
     {
       "ref": "ai1",
       "domain": "人工智能",
       "statement": "机器学习是从数据中学习规律，而不是显式编写规则。",
       "name": "机器学习",
-      "cues": [{ "front": "机器学习和传统编程的区别？", "back": "它从数据中学习规律，而不是显式编写规则。" }]
+      "cues": [
+        {
+          "front": "机器学习和传统编程的区别？",
+          "back": "它从数据中学习规律，而不是显式编写规则。"
+        }
+      ],
+      "difficulty": {
+        "tier": 1,
+        "cognitive": "remember",
+        "minutes": 3
+      }
     },
     {
       "ref": "ai2",
       "domain": "人工智能",
       "statement": "监督学习需要带标签的训练数据。",
       "name": "监督学习",
-      "cues": [{ "front": "监督学习需要什么样的数据？", "back": "带标签的训练数据。" }]
+      "cues": [
+        {
+          "front": "监督学习需要什么样的数据？",
+          "back": "带标签的训练数据。"
+        }
+      ],
+      "difficulty": {
+        "tier": 2,
+        "cognitive": "understand",
+        "minutes": 5
+      }
     },
     {
       "ref": "ai3",
       "domain": "人工智能",
       "statement": "分类任务输出离散标签，回归任务输出连续数值。",
       "name": "分类与回归",
-      "cues": [{ "front": "分类和回归的输出有什么不同？", "back": "分类输出离散标签，回归输出连续数值。" }]
+      "cues": [
+        {
+          "front": "分类和回归的输出有什么不同？",
+          "back": "分类输出离散标签，回归输出连续数值。"
+        }
+      ],
+      "difficulty": {
+        "tier": 2,
+        "cognitive": "understand",
+        "minutes": 6
+      }
     },
     {
       "ref": "ai4",
       "domain": "人工智能",
       "statement": "监督学习按输出类型分为分类与回归。",
       "name": "监督学习的分类",
-      "cues": [{ "front": "监督学习按输出类型怎么分？", "back": "分为分类与回归。" }]
+      "cues": [
+        {
+          "front": "监督学习按输出类型怎么分？",
+          "back": "分为分类与回归。"
+        }
+      ],
+      "difficulty": {
+        "tier": 2,
+        "cognitive": "understand",
+        "minutes": 6
+      }
     },
     {
       "ref": "ai5",
       "domain": "人工智能",
       "statement": "过拟合是模型记住了训练集却无法泛化到新数据。",
       "name": "过拟合",
-      "cues": [{ "front": "什么是过拟合？", "back": "模型记住了训练集却无法泛化到新数据。" }]
+      "cues": [
+        {
+          "front": "什么是过拟合？",
+          "back": "模型记住了训练集却无法泛化到新数据。"
+        }
+      ],
+      "difficulty": {
+        "tier": 3,
+        "cognitive": "understand",
+        "minutes": 10
+      }
     },
     {
       "ref": "ai6",
       "domain": "人工智能",
       "statement": "只用训练集评估性能会高估泛化能力。",
       "name": "评估的偏差",
-      "cues": [{ "front": "为什么不能只看训练集准确率？", "back": "因为会高估泛化能力。" }]
+      "cues": [
+        {
+          "front": "为什么不能只看训练集准确率？",
+          "back": "因为会高估泛化能力。"
+        }
+      ],
+      "difficulty": {
+        "tier": 3,
+        "cognitive": "analyze",
+        "minutes": 12
+      }
     },
     {
       "ref": "ai7",
       "domain": "人工智能",
       "statement": "正则化通过惩罚模型复杂度来缓解过拟合。",
       "name": "正则化",
-      "cues": [{ "front": "正则化如何缓解过拟合？", "back": "通过惩罚模型复杂度。" }]
+      "cues": [
+        {
+          "front": "正则化如何缓解过拟合？",
+          "back": "通过惩罚模型复杂度。"
+        }
+      ],
+      "difficulty": {
+        "tier": 3,
+        "cognitive": "understand",
+        "minutes": 10
+      }
     }
   ],
   "chains": [
-    { "premises": ["cs2", "cs3", "cs4"], "conclusion": "cs5", "strength": 0.9 },
-    { "premises": ["ai2", "ai3"], "conclusion": "ai4", "strength": 0.9 },
-    { "premises": ["ai5"], "conclusion": "ai6", "strength": 0.75 }
+    {
+      "premises": [
+        "cs2",
+        "cs3",
+        "cs4"
+      ],
+      "conclusion": "cs5",
+      "strength": 0.9
+    },
+    {
+      "premises": [
+        "ai2",
+        "ai3"
+      ],
+      "conclusion": "ai4",
+      "strength": 0.9
+    },
+    {
+      "premises": [
+        "ai5"
+      ],
+      "conclusion": "ai6",
+      "strength": 0.75
+    }
   ]
 }

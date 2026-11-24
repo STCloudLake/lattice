@@ -1,4 +1,38 @@
+import type { CognitiveLevel, Difficulty } from '@lattice/core';
 import type { ExtractionCandidate, ExtractedChain, ExtractedProposition } from './types.js';
+
+const COGNITIVE = new Set<string>(['remember', 'understand', 'apply', 'analyze', 'evaluate']);
+
+/** Parses the model's difficulty object; returns issues instead of throwing. */
+export function readDifficulty(
+  raw: unknown,
+  path: string,
+  issues: { severity: 'error' | 'warning'; path: string; message: string }[],
+): Difficulty | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'object' || raw === null) {
+    issues.push({ severity: 'warning', path, message: 'difficulty 不是对象，已忽略' });
+    return undefined;
+  }
+  const value = raw as Record<string, unknown>;
+  const tierRaw = value['tier'];
+  const tier = typeof tierRaw === 'number' ? Math.round(tierRaw) : NaN;
+  if (!(tier >= 1 && tier <= 5)) {
+    issues.push({ severity: 'warning', path: `${path}.tier`, message: 'tier 必须是 1–5，已按 3 处理' });
+  }
+  const cognitiveRaw = value['cognitive'];
+  const cognitive: CognitiveLevel =
+    typeof cognitiveRaw === 'string' && COGNITIVE.has(cognitiveRaw) ? (cognitiveRaw as CognitiveLevel) : 'understand';
+  if (typeof cognitiveRaw === 'string' && !COGNITIVE.has(cognitiveRaw)) {
+    issues.push({ severity: 'warning', path: `${path}.cognitive`, message: `未知认知层级 ${cognitiveRaw}，已按 understand 处理` });
+  }
+  const minutesRaw = value['minutes'];
+  const difficulty: Difficulty = { tier: (tier >= 1 && tier <= 5 ? tier : 3) as Difficulty['tier'], cognitive };
+  if (typeof minutesRaw === 'number' && minutesRaw > 0 && minutesRaw <= 600) {
+    difficulty.minutes = Math.round(minutesRaw);
+  }
+  return difficulty;
+}
 
 export type IssueSeverity = 'error' | 'warning';
 
@@ -97,6 +131,8 @@ export function validateCandidateJson(raw: unknown): CandidateValidation {
     } else {
       warn(`${at}.quote`, '缺少原文引文，无法核对出处');
     }
+    const difficulty = readDifficulty(item['difficulty'], `${at}.difficulty`, issues);
+    if (difficulty) prop.difficulty = difficulty;
     propositions.push(prop);
   });
 

@@ -177,6 +177,7 @@ export function buildMergePlan(
     };
     if (proposition.name) entry.name = proposition.name;
     if (proposition.quote) entry.quote = proposition.quote;
+    if (proposition.difficulty) entry.difficulty = proposition.difficulty;
     plan.create.push(entry);
     target.set(proposition.ref, { kind: 'create' });
     plan.cues.push({
@@ -255,6 +256,7 @@ export function planToEvents(plan: MergePlan, options: PlanToEventsOptions): Pla
         statement: entry.statement,
         ...(entry.name ? { name: entry.name } : {}),
         ...(plan.domain ? { domain: plan.domain } : {}),
+        ...(entry.difficulty ? { difficulty: entry.difficulty } : {}),
         aliases: entry.aliases,
         provenance: entry.quote ? [provenanceFor(options.source, entry.quote)] : [provenance],
       },
@@ -345,4 +347,90 @@ export async function generateCurriculum(
   // The declared domain wins: it is the interest key, not a model suggestion.
   candidate.domain = input.domain;
   return { candidate, promptVersion: CURRICULUM_PROMPT_VERSION, raw };
+}
+
+
+export const GRADING_PROMPT_VERSION = 'grading-v1';
+
+export const GRADING_SYSTEM = `你是知识难度的评分员。给每个知识点标注两个维度，不要看学习者是谁。
+
+tier（★1–5，掌握它本身有多难）：
+1 = 术语/单点事实（能记住即可）
+2 = 概念关系/为什么（要理解一个因果或定义间的关系）
+3 = 多步应用/条件判断（要在具体情境中选择并执行步骤）
+4 = 推导/边界与反例（要自己推出结论，或判断何时不成立）
+5 = 评价/跨领域综合（要比较方案、权衡取舍、迁移到新领域）
+
+cognitive：remember（记住）| understand（解释）| apply（套用）| analyze（拆解/推导）| evaluate（评判）。
+minutes：首次理解所需的大致分钟数（1–120）。
+两个维度独立：一个事实可以 tier 低但 cognitive=apply（比如「用哈希表做去重」）。
+
+只输出一个 JSON 对象：
+{"grades":[{"ref":"p1","tier":3,"cognitive":"apply","minutes":10,"why":"一句话依据"}]}`;
+
+export interface DifficultyGrade {
+  ref: string;
+  tier: 1 | 2 | 3 | 4 | 5;
+  cognitive: 'remember' | 'understand' | 'apply' | 'analyze' | 'evaluate';
+  minutes?: number;
+  why?: string;
+}
+
+/**
+ * Batch difficulty grading for existing knowledge points — the "delegate to an
+ * API" path. Deterministic mapping back to refs; invalid entries are dropped.
+ */
+export async function gradeDifficulty(
+  items: Array<{ ref: string; statement: string; domain?: string }>,
+  options: { llm: LlmPort; maxTokens?: number },
+): Promise<{ grades: DifficultyGrade[]; promptVersion: string; raw: string; dropped: string[] }> {
+  const raw = await options.llm.complete({
+    messages: [
+      { role: 'system', content: GRADING_SYSTEM },
+      {
+        role: 'user',
+        content: JSON.stringify(
+          items.map((item) => ({ ref: item.ref, statement: item.statement, domain: item.domain ?? null })),
+          null,
+          1,
+        ),
+      },
+    ],
+    temperature: 0,
+    maxTokens: options.maxTokens ?? 2000,
+  });
+
+  let parsed: unknown;
+  try {
+    parsed = extractJsonObject(raw);
+  } catch (err) {
+    throw new ExtractionError(`难度评分输出不是合法 JSON：${(err as Error).message}`);
+  }
+  const record = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
+  const list = Array.isArray(record['grades']) ? record['grades'] : [];
+  const wanted = new Set(items.map((item) => item.ref));
+  const grades: DifficultyGrade[] = [];
+  const dropped: string[] = [];
+  for (const entry of list) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const value = entry as Record<string, unknown>;
+    const ref = typeof value['ref'] === 'string' ? value['ref'] : undefined;
+    if (!ref || !wanted.has(ref)) continue;
+    const tierRaw = typeof value['tier'] === 'number' ? Math.round(value['tier']) : NaN;
+    if (!(tierRaw >= 1 && tierRaw <= 5)) {
+      dropped.push(ref);
+      continue;
+    }
+    const cognitiveRaw = typeof value['cognitive'] === 'string' ? value['cognitive'] : 'understand';
+    const cognitive = ['remember', 'understand', 'apply', 'analyze', 'evaluate'].includes(cognitiveRaw)
+      ? (cognitiveRaw as DifficultyGrade['cognitive'])
+      : 'understand';
+    const grade: DifficultyGrade = { ref, tier: tierRaw as DifficultyGrade['tier'], cognitive };
+    const minutesRaw = value['minutes'];
+    if (typeof minutesRaw === 'number' && minutesRaw > 0 && minutesRaw <= 600) grade.minutes = Math.round(minutesRaw);
+    if (typeof value['why'] === 'string') grade.why = value['why'].slice(0, 120);
+    grades.push(grade);
+  }
+  for (const ref of wanted) if (!grades.some((grade) => grade.ref === ref)) dropped.push(ref);
+  return { grades, promptVersion: GRADING_PROMPT_VERSION, raw, dropped: [...new Set(dropped)] };
 }

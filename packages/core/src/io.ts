@@ -1,4 +1,4 @@
-import type { CueKind, Id, ISODate, LatticeEvent } from './types.js';
+import type { CognitiveLevel, CueKind, Difficulty, Id, ISODate, LatticeEvent } from './types.js';
 import { dedupeAndSort } from './replay.js';
 import { assertChain, assertCue, assertProposition, validateEvent, type EventFactory } from './events.js';
 
@@ -56,7 +56,29 @@ export interface PropositionPackEntry {
   name?: string;
   aliases?: string[];
   domain?: string;
+  difficulty?: Difficulty;
   cues: PropositionPackCue[];
+}
+
+const COGNITIVE_LEVELS: ReadonlySet<string> = new Set<CognitiveLevel>([
+  'remember',
+  'understand',
+  'apply',
+  'analyze',
+  'evaluate',
+]);
+
+function readPackDifficulty(value: unknown): Difficulty | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const raw = value as Record<string, unknown>;
+  const tier = typeof raw['tier'] === 'number' ? Math.round(raw['tier']) : NaN;
+  if (!(tier >= 1 && tier <= 5)) return undefined;
+  const cognitiveRaw = typeof raw['cognitive'] === 'string' ? raw['cognitive'] : '';
+  const cognitive = COGNITIVE_LEVELS.has(cognitiveRaw) ? (cognitiveRaw as CognitiveLevel) : 'understand';
+  const difficulty: Difficulty = { tier: tier as Difficulty['tier'], cognitive };
+  const minutes = raw['minutes'];
+  if (typeof minutes === 'number' && minutes > 0 && minutes <= 600) difficulty.minutes = Math.round(minutes);
+  return difficulty;
 }
 
 export interface PropositionPackChain {
@@ -122,6 +144,8 @@ export function parsePropositionPack(text: string): { pack?: PropositionPack; er
     if (typeof e['name'] === 'string') entryOut.name = e['name'];
     if (Array.isArray(e['aliases'])) entryOut.aliases = e['aliases'].filter((x): x is string => typeof x === 'string');
     if (typeof e['domain'] === 'string') entryOut.domain = e['domain'];
+    const difficulty = readPackDifficulty(e['difficulty']);
+    if (difficulty) entryOut.difficulty = difficulty;
     propositions.push(entryOut);
   });
 

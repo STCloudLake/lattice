@@ -57,6 +57,21 @@ export interface ProvenanceRef {
 
 export type PropositionStatus = 'active' | 'superseded' | 'archived';
 
+/**
+ * How hard a knowledge point is *to acquire*, independent of the learner.
+ * Two dimensions on purpose: a fact can be hard to remember but easy to apply,
+ * or easy to state but hard to evaluate. See docs/difficulty.md.
+ */
+export type CognitiveLevel = 'remember' | 'understand' | 'apply' | 'analyze' | 'evaluate';
+
+export interface Difficulty {
+  /** ★1 facts/terminology → ★5 evaluation/synthesis across domains. */
+  tier: 1 | 2 | 3 | 4 | 5;
+  cognitive: CognitiveLevel;
+  /** Rough time to first understanding, in minutes. */
+  minutes?: number;
+}
+
 /** K ledger: an objective claim. Never carries learner state. */
 export interface Proposition {
   id: Id;
@@ -68,6 +83,8 @@ export interface Proposition {
   createdAt: ISODate;
   mergedInto?: Id;
   provenance: ProvenanceRef[];
+  /** Optional until the grader has seen it. */
+  difficulty?: Difficulty;
 }
 
 /**
