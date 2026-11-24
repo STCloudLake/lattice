@@ -12,6 +12,25 @@ Software that models a person's mind has an obvious dark path. This file exists 
 6. **No dependency by design.** The user's data is exportable at any time in a plain format, and the tool keeps working offline. Deleting everything is one action.
 7. **No claims without measurement.** We do not say "improves learning" unless the hold-back comparison or the calibration report supports it. When the evidence is absent, the UI says so.
 
+## No impersonation, ever
+
+Knowledge delivered "like an ad" may look native — same typography, same container,
+sitting in a comment area or a recommendation list — but it is **always attributed**
+(`Lattice` badge). We do not generate fake usernames, avatars, likes, timestamps, or
+"网友评论" framing. Reasons:
+
+1. **It is deception.** A comment attributed to a person who does not exist is a lie
+   about who said it, regardless of whether the fact is true.
+2. **It borrows trust that is not ours.** Native-looking words carry social proof they
+   did not earn; that is the definition of a dark pattern.
+3. **It breaks the platforms and the store.** Comment injection that fakes user
+   content violates most platform terms and gets extensions removed.
+4. **It poisons our own data.** If users cannot tell injected content from real
+   discussion, their feedback about what works becomes meaningless.
+
+If a surface can only be served by faking user content, we skip that surface.
+Attribution may be small and quiet, but it must be present and legible.
+
 ## Constraints we accept as costs
 
 - Local-first means **no cross-device sync without the user running something**. We accept the friction.
