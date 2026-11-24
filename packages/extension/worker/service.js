@@ -14,18 +14,25 @@
 import {
   activePropositions,
   answerQuiz,
+  buildFeed,
   buildMergePlan,
   buildQueue,
   calibrate,
   chainKey,
   createEventFactory,
   createIdFactory,
+  dayOf,
   dueItems,
   emptyMastery,
+  exposureEngaged,
+  exposureOf,
+  exposureShown,
+  exposureSkipped,
   exportJsonl as exportEventsJsonl,
   extractCandidate,
   formatReport,
   foundationPropositions,
+  interestsOf,
   masterySummary,
   newItems,
   normalizeSource,
@@ -52,6 +59,13 @@ import { normalizeStatement } from './util.js';
 
 /** How many new propositions a single queue may introduce. */
 const NEW_PER_QUEUE = 20;
+
+/** Ad-like default dose when the page does not send its `latticeFeedSettings.dose`. */
+const DEFAULT_FEED_DOSE = 3;
+const MAX_FEED_DOSE = 50;
+
+/** C-ledger attention events. They never touch mastery or the schedule. */
+const EXPOSURE_KINDS = new Set(['shown', 'engaged', 'skipped']);
 
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS events (
@@ -197,7 +211,11 @@ function normalizePlan(raw) {
     return { premiseRefs, conclusionRef, strength };
   });
 
-  return { create, reuse, cues, chains, dropped: [] };
+  // The domain is the interest signal: it lands on every created proposition and
+  // makes planToEvents() emit `interest.observed` even when all propositions were
+  // reused. It is not a per-entry field, so it must survive the page round-trip.
+  const domain = cleanText(raw.domain).slice(0, 40);
+  return { ...(domain ? { domain } : {}), create, reuse, cues, chains, dropped: [] };
 }
 
 function modelFromLabel(label) {
@@ -247,6 +265,8 @@ export class LatticeService {
   #state = null;
   #seedErrors = [];
   #openErrors = [];
+  /** Last dose the page asked for; used when exposure() recomputes the feed. */
+  #feedDose = DEFAULT_FEED_DOSE;
 
   /**
    * @param {object} options
@@ -377,10 +397,80 @@ export class LatticeService {
     };
   }
 
-  diagnostics() {
+  /**
+   * Today's push feed: a small, ad-like dose of propositions.
+   *
+   * Pure read. buildFeed() decides *what* to show (daily frequency cap, skip
+   * fatigue, prerequisite frontier, interest ordering); this method only decorates
+   * each item with the numbers the newtab needs. Nothing is written here: exposure
+   * evidence is appended by exposure().
+   */
+  feed(input = {}) {
+    const state = this.#ensureState();
+    const now = this.#nowIso(input?.now);
+    const dose = this.#feedDoseOf(input?.dose ?? this.#feedDose);
+    this.#feedDose = dose;
+    const items = buildFeed(state, { now, dose }).map((item) => this.#feedItemView(state, item, now));
+    return {
+      items,
+      dose,
+      interests: this.#interestViews(state),
+      todayDate: dayOf(now),
+    };
+  }
+
+  /**
+   * Appends ONE C-ledger attention event (`shown` / `engaged` / `skipped`) and
+   * returns the feed recomputed after it, so the page can advance without a second
+   * round-trip. One transaction; `system` actor. Exposure is evidence of attention,
+   * never of understanding: mastery and the FSRS schedule are untouched.
+   */
+  exposure(input = {}) {
+    const propositionId = String(input?.propositionId ?? '').trim();
+    const kind = String(input?.kind ?? '').trim();
+    if (!propositionId) throw new Error('缺少 propositionId');
+    if (!EXPOSURE_KINDS.has(kind)) throw new Error('曝光类型无效（应为 shown / engaged / skipped）');
+    const state = this.#ensureState();
+    if (!state.propositions[propositionId]) throw new Error('命题不存在，可能已被清空');
+
+    const now = this.#nowIso(input?.now);
+    const surface = cleanText(input?.surface).slice(0, 40) || 'newtab';
+    const factory = this.#newFactory();
+    const opts = { at: now, actor: 'system' };
+    let event;
+    if (kind === 'shown') {
+      const reason = cleanText(input?.reason).slice(0, 20);
+      event = exposureShown(
+        factory,
+        { propositionId, surface, ...(reason ? { reason } : {}), day: dayOf(now) },
+        opts,
+      );
+    } else if (kind === 'engaged') {
+      event = exposureEngaged(factory, { propositionId, surface }, opts);
+    } else {
+      event = exposureSkipped(factory, { propositionId, surface }, opts);
+    }
+    this.#seq = factory.seq;
+    this.#append([event]);
+    return { ok: true, feed: this.feed({ dose: input?.dose, now }) };
+  }
+
+  diagnostics(input = {}) {
     const state = this.#ensureState();
     const render = this.render();
     const report = calibrate(samplesFromState(state));
+    const now = this.#clock.now().toISOString();
+    const today = dayOf(now);
+    const dose = this.#feedDoseOf(input?.dose ?? this.#feedDose);
+    this.#feedDose = dose;
+    let shownToday = 0;
+    let engaged = 0;
+    let skipped = 0;
+    for (const exposure of Object.values(state.exposures)) {
+      if (exposure.lastShownDay === today) shownToday += 1;
+      engaged += exposure.engaged;
+      skipped += exposure.skipped;
+    }
     return {
       schemaVersion: 1,
       storage: this.#mode,
@@ -394,6 +484,15 @@ export class LatticeService {
       coverageCount: this.#coverageCount(),
       calibration: report,
       reportText: formatReport(report),
+      // Push-layer facts for 诊断: the C ledger side, not learner state.
+      feed: {
+        dose,
+        todayDate: today,
+        shownToday,
+        engaged,
+        skipped,
+        interests: this.#interestViews(state),
+      },
       openErrors: this.#openErrors,
       seedErrors: this.#seedErrors,
     };
@@ -591,6 +690,7 @@ export class LatticeService {
         committed: false,
         alreadyCovered: true,
         source,
+        domain: null,
         counts: { propositions: 0, reused: 0, cues: 0, chains: 0, events: 0 },
         coverage: existingCoverage,
       };
@@ -644,7 +744,7 @@ export class LatticeService {
       return true;
     });
 
-    const plan = { create, reuse, cues, chains, dropped: [] };
+    const plan = { ...(rawPlan.domain ? { domain: rawPlan.domain } : {}), create, reuse, cues, chains, dropped: [] };
     const providerLabel = cleanText(input.providerLabel);
     const model = cleanText(input.model) || modelFromLabel(providerLabel);
     const promptVersion = cleanText(input.promptVersion);
@@ -680,6 +780,7 @@ export class LatticeService {
       committed: built.events.length > 0,
       alreadyCovered: false,
       source,
+      domain: plan.domain ?? null,
       counts,
       coverage: this.#coverageView(this.#coverageRow(source.sourceHash)),
     };
@@ -885,6 +986,52 @@ export class LatticeService {
       reviewCount: schedule?.reviewCount ?? 0,
       stage: schedule?.stage ?? 'new',
     };
+  }
+
+  /** ISO instant for a read: caller may pin it (tests / deterministic replay). */
+  #nowIso(value) {
+    return isIsoDate(value) ? new Date(value).toISOString() : this.#clock.now().toISOString();
+  }
+
+  #feedDoseOf(value) {
+    const dose = Math.round(Number(value));
+    if (!Number.isFinite(dose) || dose <= 0) return DEFAULT_FEED_DOSE;
+    return Math.min(MAX_FEED_DOSE, Math.max(1, dose));
+  }
+
+  /** Plain-JSON feed item: everything the newtab card renders, nothing internal. */
+  #feedItemView(state, item, now) {
+    const proposition = state.propositions[item.propositionId];
+    const cue = item.cueId ? state.cues[item.cueId] : undefined;
+    const mastery = state.mastery[item.propositionId] ?? emptyMastery(item.propositionId, now);
+    const summary = masterySummary(mastery);
+    const schedule = state.schedule[item.propositionId];
+    const exposure = exposureOf(state, item.propositionId);
+    const view = {
+      propositionId: item.propositionId,
+      kind: item.kind,
+      reason: item.reason,
+      score: item.score,
+      statement: proposition?.statement ?? '',
+      mastery: { mean: summary.mean, low: summary.low, high: summary.high },
+      retrievability: schedule ? retrievability(schedule, now) : 0,
+      exposure: { shown: exposure.shown, engaged: exposure.engaged, skipped: exposure.skipped },
+    };
+    if (item.cueId) {
+      view.cueId = item.cueId;
+      view.cueFront = cue?.front ?? '';
+      view.cueBack = cue?.back ?? '';
+    }
+    if (item.domain) view.domain = item.domain;
+    return view;
+  }
+
+  #interestViews(state) {
+    return interestsOf(state).map((interest) => ({
+      name: interest.name,
+      weight: interest.weight,
+      count: interest.captureCount,
+    }));
   }
 
   #newFactory() {

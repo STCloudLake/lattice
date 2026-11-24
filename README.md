@@ -2,7 +2,7 @@
 
 **An inspectable learner model for ambient learning.** Local-first, open source (Apache-2.0), no account, no telemetry.
 
-> Status: **M1a** — the data spine works end to end (event log → four ledgers → FSRS + Beta mastery → queue → export/replay/calibration), and content can now be turned into a knowledge graph: paste text → LLM extracts propositions + reasoning chains → you review and confirm → chains give derived prerequisites. Path planning, push policy and capture from pages/PDF are still ahead. See [docs/m0-report.md](docs/m0-report.md) for the M0 baseline.
+> Status: **M2a** — capture a page (toolbar icon) and it becomes an **interest signal**: an LLM extracts propositions + reasoning chains + a domain, prerequisite structure is derived, and a small daily dose is pushed into the new tab **like an ad** (know it / not interested / test me). Exposure is tracked in the context ledger and never inflates mastery. Sidebar/notification surfaces, held-back counterfactuals and PDF capture are still ahead. See [docs/m2-feed.md](docs/m2-feed.md) for the push design and [docs/m0-report.md](docs/m0-report.md) for the spine.
 
 Lattice keeps four separate ledgers about a learner and never mixes them:
 
@@ -24,7 +24,7 @@ The one rule that shapes the whole design: **attention is not evidence of unders
 ```bash
 npm install
 npm run build          # compiles @lattice/core and bundles the extension
-npm test               # 53 tests (core + extract + CLI)
+npm test               # 61 tests (core + extract + CLI)
 npm run verify         # 7 acceptance checks
 npm run verify:e2e     # + loads the extension in a real browser (needs Chrome/Edge)
 ```
@@ -79,6 +79,7 @@ docs/                  design, storage decision, data format, M0 report, product
 
 ## Design docs
 
+- [docs/m2-feed.md](docs/m2-feed.md) — the ad-like push layer (interest → dose → feed)
 - [docs/design.md](docs/design.md) — architecture and the four-ledger model
 - [docs/product-report.md](docs/product-report.md) — feature baseline for v1.0 (58 features, M0–M3)
 - [docs/user-manual.md](docs/user-manual.md) — user manual (v1.0)

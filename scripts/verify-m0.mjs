@@ -179,6 +179,13 @@ check('background capture orchestration', () => {
   return '7 cases';
 });
 
+check('feed policy smoke test', () => {
+  const out = run(process.execPath, ['packages/extension/test/feed-smoke.mjs']);
+  if (!out.includes('FEED SMOKE OK')) throw new Error('feed smoke did not report OK');
+  const m = out.match(/digest ([0-9a-f]+)/);
+  return m ? `digest ${m[1]}` : 'ok';
+});
+
 check('extraction capture smoke test', () => {
   const out = run(process.execPath, ['packages/extension/test/capture-smoke.mjs']);
   if (!out.includes('CAPTURE SMOKE OK')) throw new Error('capture smoke did not report OK');

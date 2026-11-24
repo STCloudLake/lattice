@@ -17,6 +17,12 @@ const RPC_TIMEOUTS = { extractPreview: 150000, providerTest: 75000, commitExtrac
 const PROVIDER_STORAGE_KEY = 'latticeProvider';
 const PENDING_CAPTURE_KEY = 'latticePendingCapture';
 const CAPTURE_SETTINGS_KEY = 'latticeCaptureSettings';
+/** Push-layer settings (page-owned, like the capture settings). */
+const FEED_SETTINGS_KEY = 'latticeFeedSettings';
+const FEED_DOSE_CHOICES = [3, 5, 10];
+const DEFAULT_FEED_DOSE = 3;
+/** 今日推送 is the default surface; 复习队列 is the optional second one. */
+const SURFACES = ['feed', 'queue'];
 
 // Model names are NOT hardcoded per vendor: they change (DeepSeek renamed
 // deepseek-chat to deepseek-flash). The UI can pull the real list from /models.
@@ -42,12 +48,33 @@ const els = {
   counterNew: $('counter-new'),
   counterTotal: $('counter-total'),
   btnSettings: $('btn-settings'),
+  tabFeed: $('tab-feed'),
+  tabReview: $('tab-review'),
+  tabReviewCount: $('tab-review-count'),
 
   viewLoading: $('view-loading'),
   viewEmpty: $('view-empty'),
+  viewFeed: $('view-feed'),
   viewCard: $('view-card'),
   viewDone: $('view-done'),
   viewFatal: $('view-fatal'),
+
+  feedCard: $('feed-card'),
+  feedLoading: $('feed-loading'),
+  feedDone: $('feed-done'),
+  feedDoneDetail: $('feed-done-detail'),
+  feedDomain: $('feed-domain'),
+  feedReason: $('feed-reason'),
+  feedStatement: $('feed-statement'),
+  feedCue: $('feed-cue'),
+  feedMeta: $('feed-meta'),
+  feedSource: $('feed-source'),
+  feedProgress: $('feed-progress'),
+  btnFeedKnow: $('btn-feed-know'),
+  btnFeedSkip: $('btn-feed-skip'),
+  btnFeedQuiz: $('btn-feed-quiz'),
+  btnFeedReview: $('btn-feed-review'),
+  btnFeedCapture: $('btn-feed-capture'),
 
   btnSample: $('btn-sample'),
   btnCaptureTop: $('btn-capture-top'),
@@ -69,6 +96,7 @@ const els = {
   doneDetail: $('done-detail'),
   btnDoneExport: $('btn-done-export'),
   btnDoneRefresh: $('btn-done-refresh'),
+  btnDoneFeed: $('btn-done-feed'),
 
   fatalDetail: $('fatal-detail'),
   btnRetry: $('btn-retry'),
@@ -159,17 +187,28 @@ const els = {
 
 const state = {
   mode: 'review', // 'review' | 'quiz'
+  modeBeforeQuiz: 'review',
   captureSourceKind: 'paste',
   captureSourceUri: '',
   captureSettings: { autoCommit: true },
+  feedSettings: { dose: DEFAULT_FEED_DOSE },
   silentCapture: false,
   payload: null,
   card: null,
   cardShownAt: 0,
+  cardOrigin: 'queue', // 'queue' | 'feed'
   revealed: false,
   busy: false,
   fatal: false,
+  surface: 'feed', // 'feed' (今日推送) | 'queue' (复习队列)
   view: 'loading',
+  feed: {
+    items: [],
+    interests: [],
+    today: '',
+    shown: new Set(), // `${day}|${propositionId}` already logged in this page
+    busy: false,
+  },
   answered: new Set(), // queue keys answered in this page session (quiz mode needs it)
   diagnostics: null,
   provider: null, // {preset, baseUrl, model, apiKey} from chrome.storage.local
@@ -179,6 +218,8 @@ const state = {
 };
 
 let pendingJsonlText = '';
+/** Monotonic token so a stale feed response can never overwrite a newer one. */
+let feedRequestToken = 0;
 
 // ---------------------------------------------------------------------------
 // RPC client
@@ -292,6 +333,49 @@ function onCaptureAutoCommitChange() {
       ? '已开启自动入库：捕获后直接写入，只提示结果'
       : '已关闭自动入库：每次捕获都会先展示预览',
   );
+}
+
+// ---------------------------------------------------------------------------
+// Push settings (每日剂量). Lives in chrome.storage.local; the worker only ever
+// receives the resulting `dose` per feed call, so the policy stays in core.
+// ---------------------------------------------------------------------------
+
+function normalizeDose(value) {
+  const dose = Math.round(Number(value));
+  return FEED_DOSE_CHOICES.includes(dose) ? dose : DEFAULT_FEED_DOSE;
+}
+
+async function loadFeedSettings() {
+  const area = storageArea();
+  if (!area) return;
+  try {
+    const got = (await area.get(FEED_SETTINGS_KEY)) ?? {};
+    const value = got[FEED_SETTINGS_KEY];
+    if (value && typeof value === 'object') state.feedSettings.dose = normalizeDose(value.dose);
+  } catch {
+    /* defaults are fine; settings must never block boot */
+  }
+}
+
+async function persistFeedSettings() {
+  const area = storageArea();
+  if (!area) return;
+  try {
+    await area.set({ [FEED_SETTINGS_KEY]: { dose: state.feedSettings.dose } });
+  } catch {
+    toast('保存设置失败');
+  }
+}
+
+function onFeedDoseChange(dose) {
+  const next = normalizeDose(dose);
+  if (next === state.feedSettings.dose) return;
+  state.feedSettings.dose = next;
+  void persistFeedSettings();
+  toast(`每日剂量已设为 ${next} 条`);
+  if (state.surface === 'feed' && state.payload && !state.payload.empty) {
+    void refreshFeedAndPaint();
+  }
 }
 
 async function loadProviderConfig() {
@@ -534,6 +618,7 @@ async function boot() {
   try {
     await loadProviderConfig();
     await loadCaptureSettings();
+    await loadFeedSettings();
     const init = await rpc('init');
     if (init.storage === 'fallback') {
       const detail = init.persisted ? 'chrome.storage 持久化' : '仅内存（未检测到 chrome.storage）';
@@ -555,6 +640,7 @@ function fail(message) {
 const VIEWS = {
   loading: () => els.viewLoading,
   empty: () => els.viewEmpty,
+  feed: () => els.viewFeed,
   card: () => els.viewCard,
   done: () => els.viewDone,
   fatal: () => els.viewFatal,
@@ -576,12 +662,16 @@ async function refresh() {
 
 // ---------------------------------------------------------------------------
 // Rendering
+//
+// Two surfaces share the stage: 今日推送 (default, ad-like feed) and 复习队列
+// (the M0 card flow, kept as an optional entry for deliberate practice).
 // ---------------------------------------------------------------------------
 
 function paint() {
   const payload = state.payload;
   if (!payload) return;
   updateCounters(payload);
+  paintTabs();
   if (state.fatal) {
     showView('fatal');
     return;
@@ -591,12 +681,48 @@ function paint() {
     els.btnSample.focus();
     return;
   }
+  if (state.surface === 'queue') {
+    paintQueue(payload);
+    return;
+  }
+  paintFeed();
+}
+
+function paintTabs() {
+  if (!els.tabFeed) return;
+  const due = state.payload?.counts?.due ?? 0;
+  els.tabReviewCount.textContent = String(due);
+  const onFeed = state.surface === 'feed';
+  els.tabFeed.classList.toggle('is-active', onFeed);
+  els.tabReview.classList.toggle('is-active', !onFeed);
+  els.tabFeed.setAttribute('aria-selected', String(onFeed));
+  els.tabReview.setAttribute('aria-selected', String(!onFeed));
+}
+
+function setSurface(surface) {
+  if (!SURFACES.includes(surface) || state.surface === surface) return;
+  state.surface = surface;
+  paintTabs();
+  if (!state.payload) return;
+  if (state.payload.empty) {
+    paint();
+    return;
+  }
+  if (surface === 'queue') {
+    paintQueue(state.payload);
+    return;
+  }
+  void refreshFeedAndPaint();
+}
+
+function paintQueue(payload) {
   const queue = payload.queue.filter((item) => !state.answered.has(itemKey(item)));
   if (queue.length === 0) {
     paintDone(payload);
     return;
   }
   state.card = queue[0];
+  state.cardOrigin = 'queue';
   state.cardShownAt = performance.now();
   state.revealed = false;
   showView('card');
@@ -612,6 +738,171 @@ function paintDone(payload) {
       : `共 ${payload.counts.propositions} 个命题 · 复习 ${payload.counts.reviews} 次 · 校验摘要 ${payload.digest}`;
   showView('done');
   els.btnDoneExport.focus();
+}
+
+// ---------------------------------------------------------------------------
+// Feed (今日推送): one passive card at a time, ads-like.
+//
+// Showing an item logs exposure.shown exactly once per proposition per day (the
+// worker enforces it across reloads; the local Set only guards re-paints). The
+// three actions map to C-ledger events: 知道了 -> engaged, 不感兴趣 -> skipped,
+// 考考我 -> the optional quiz flow (M ledger only).
+// ---------------------------------------------------------------------------
+
+function applyFeedResult(result) {
+  const feed = result && typeof result === 'object' ? result : {};
+  state.feed.items = Array.isArray(feed.items) ? feed.items : [];
+  state.feed.interests = Array.isArray(feed.interests) ? feed.interests : [];
+  if (typeof feed.todayDate === 'string' && feed.todayDate.length > 0) state.feed.today = feed.todayDate;
+}
+
+async function refreshFeedAndPaint() {
+  const token = (feedRequestToken += 1);
+  state.feed.busy = true;
+  showView('feed');
+  els.feedCard.hidden = true;
+  els.feedDone.hidden = true;
+  els.feedLoading.hidden = false;
+  try {
+    const result = await rpc('feed', { dose: state.feedSettings.dose });
+    if (token !== feedRequestToken) return; // a newer request owns the stage
+    applyFeedResult(result);
+  } catch (err) {
+    if (token === feedRequestToken) toast(err.message);
+  } finally {
+    if (token === feedRequestToken) {
+      state.feed.busy = false;
+      paintFeedView();
+    }
+  }
+}
+
+function paintFeed() {
+  if (state.feed.items.length > 0) {
+    paintFeedView();
+    return;
+  }
+  void refreshFeedAndPaint();
+}
+
+function paintFeedView() {
+  showView('feed');
+  els.feedLoading.hidden = true;
+  if (state.feed.items.length === 0) {
+    paintFeedDone();
+    return;
+  }
+  paintFeedCard(state.feed.items[0]);
+}
+
+function paintFeedCard(item) {
+  els.feedCard.hidden = false;
+  els.feedDone.hidden = true;
+  els.feedLoading.hidden = true;
+  const reasonLabel = item.reason === 'due' ? '复习' : item.reason === 'frontier' ? '前沿' : '基础';
+  els.feedReason.textContent = reasonLabel;
+  els.feedReason.dataset.reason = item.reason || 'foundation';
+  const domain = typeof item.domain === 'string' ? item.domain : '';
+  els.feedDomain.textContent = domain;
+  els.feedDomain.hidden = domain.length === 0;
+  els.feedStatement.textContent = item.statement || '（这条命题没有正文）';
+  const cue = typeof item.cueFront === 'string' ? item.cueFront.trim() : '';
+  els.feedCue.textContent = cue && cue !== item.statement ? `想一想：${cue}` : '';
+  els.feedCue.hidden = els.feedCue.textContent.length === 0;
+  els.feedMeta.textContent = `掌握 ${pct(item.mastery?.mean)}% · R ${pct(item.retrievability)}%`;
+  els.feedSource.textContent = domain ? `来自「${domain}」` : '来自你的知识库';
+  els.feedProgress.textContent = `今日剩 ${state.feed.items.length} 条 · 剂量 ${state.feedSettings.dose} 条`;
+  els.btnFeedQuiz.disabled = !item.cueId;
+  els.btnFeedQuiz.title = item.cueId ? '进入测验（可选，只写掌握账）' : '这个命题还没有卡片，暂时不能测验';
+  els.feedCard.dataset.propositionId = item.propositionId;
+  els.feedCard.dataset.reason = item.reason || '';
+  els.feedCard.dataset.domain = domain;
+  els.feedCard.dataset.remaining = String(state.feed.items.length);
+  els.viewFeed.dataset.today = state.feed.today;
+  els.btnFeedKnow.disabled = false;
+  els.btnFeedSkip.disabled = false;
+  logFeedShown(item);
+  els.btnFeedKnow.focus();
+}
+
+function paintFeedDone() {
+  els.feedCard.hidden = true;
+  els.feedLoading.hidden = true;
+  els.feedDone.hidden = false;
+  const interests = state.feed.interests;
+  els.feedDoneDetail.textContent =
+    interests.length > 0
+      ? `今天的小剂量已经完成。你的兴趣：${interests.map((entry) => `${entry.name}（×${entry.count}）`).join('、')}`
+      : '今天没有更多可推的内容。';
+  els.btnFeedReview.focus();
+}
+
+function logFeedShown(item) {
+  if (!item || typeof item.propositionId !== 'string' || item.propositionId.length === 0) return;
+  const day = state.feed.today || new Date().toISOString().slice(0, 10);
+  const key = `${day}|${item.propositionId}`;
+  if (state.feed.shown.has(key)) return;
+  state.feed.shown.add(key);
+  // The worker is the source of truth (exposure.shown carries the day); this Set
+  // only stops a re-paint in this page from logging the same card twice.
+  rpc('exposure', { propositionId: item.propositionId, kind: 'shown', surface: 'newtab' }).catch(() => {
+    state.feed.shown.delete(key); // allow a retry on the next paint
+  });
+}
+
+async function feedExposure(kind) {
+  if (state.feed.busy) return;
+  const item = state.feed.items[0];
+  if (!item) return;
+  state.feed.busy = true;
+  els.btnFeedKnow.disabled = true;
+  els.btnFeedSkip.disabled = true;
+  try {
+    const result = await rpc('exposure', {
+      propositionId: item.propositionId,
+      kind,
+      surface: 'newtab',
+      dose: state.feedSettings.dose,
+    });
+    applyFeedResult(result.feed);
+    paintFeedView();
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    state.feed.busy = false;
+    els.btnFeedKnow.disabled = false;
+    els.btnFeedSkip.disabled = false;
+  }
+}
+
+/** 考考我: optional verification, reusing the existing card flow in quiz mode. */
+function startFeedQuiz() {
+  const item = state.feed.items[0];
+  if (!item || !item.cueId) {
+    toast('这个命题还没有卡片，暂时不能测验');
+    return;
+  }
+  state.modeBeforeQuiz = state.mode;
+  state.mode = 'quiz';
+  state.cardOrigin = 'feed';
+  state.card = {
+    propositionId: item.propositionId,
+    cueId: item.cueId,
+    kind: item.kind,
+    front: item.cueFront || item.statement,
+    back: item.cueBack || item.statement,
+    statement: item.statement,
+    domain: item.domain,
+    dueAt: null,
+    mastery: item.mastery,
+    retrievability: item.retrievability,
+    reviewCount: 0,
+    stage: 'new',
+  };
+  state.revealed = false;
+  state.cardShownAt = performance.now();
+  showView('card');
+  paintCard();
 }
 
 function updateCounters(payload) {
@@ -680,6 +971,7 @@ async function submitGrade(grade) {
 async function submitQuiz(correct) {
   if (state.busy || !state.card || state.mode !== 'quiz' || !state.revealed) return;
   const card = state.card;
+  const origin = state.cardOrigin;
   const latencyMs = Math.round(performance.now() - state.cardShownAt);
   state.busy = true;
   try {
@@ -689,8 +981,19 @@ async function submitQuiz(correct) {
       correct,
       latencyMs,
     });
-    state.answered.add(itemKey(card));
     state.payload = payload;
+    if (origin === 'feed') {
+      // Optional verification from the feed is done: drop back to the passive
+      // stream. The quizzed proposition is already shown today, so the refreshed
+      // feed naturally moves on.
+      state.card = null;
+      state.cardOrigin = 'queue';
+      state.mode = state.modeBeforeQuiz;
+      state.feed.items = [];
+      paint();
+      return;
+    }
+    state.answered.add(itemKey(card));
     paint();
   } catch (err) {
     toast(err.message);
@@ -721,6 +1024,7 @@ async function importPackText(text) {
     toast(parts.join('，'));
     closeDialogs();
     els.packError.hidden = true;
+    state.feed.items = []; // new propositions must be considered by the next feed
     await refresh();
     return true;
   } catch (err) {
@@ -784,6 +1088,7 @@ async function importJsonlText(text) {
     toast(`导入 ${result.added} 条事件${problems}`);
     closeDialogs();
     els.importError.hidden = true;
+    state.feed.items = [];
     await refresh();
   } catch (err) {
     els.importError.textContent = err.message;
@@ -815,7 +1120,7 @@ function storageLabel(info) {
 function formatDiagnostics(info, graph) {
   const counts = info.counts ?? {};
   const lines = [];
-  lines.push('Lattice M0 诊断');
+  lines.push('Lattice M2 诊断');
   lines.push(`存储: ${storageLabel(info)}`);
   if (info.storageDetail) lines.push(`  VFS: ${info.storageDetail}`);
   if (info.storage === 'fallback' && !info.persisted) {
@@ -824,6 +1129,18 @@ function formatDiagnostics(info, graph) {
   if (info.backgroundLine) lines.push(info.backgroundLine);
   lines.push(`设备 ID: ${info.deviceId}`);
   lines.push(`模型: ${providerSummary(state.provider)}`);
+  if (info.feed) {
+    const feed = info.feed;
+    const interests =
+      Array.isArray(feed.interests) && feed.interests.length > 0
+        ? feed.interests.map((entry) => `${entry.name}×${entry.count}`).join('、')
+        : '无';
+    lines.push(
+      `推送: 每日 ${feed.dose ?? state.feedSettings.dose} 条 · 今日已展示 ${feed.shownToday ?? 0} · 参与 ${
+        feed.engaged ?? 0
+      } · 跳过 ${feed.skipped ?? 0} · 兴趣 ${interests}`,
+    );
+  }
   if (graph) {
     lines.push(
       `图谱: 命题 ${graph.propositions} · 推理链 ${graph.chains} · 基础 ${graph.foundation} · 有前置 ${graph.withPrereq} · 已掌握 ${graph.mastered}`,
@@ -872,11 +1189,13 @@ async function openDiagnostics() {
   els.diagText.textContent = '正在读取…';
   openDialog(els.dialogDiagnostics);
   try {
-    const [info, graph] = await Promise.all([
-      rpc('diagnostics'),
+    const [info, graph, backgroundLine] = await Promise.all([
+      rpc('diagnostics', { dose: state.feedSettings.dose }),
       rpc('graphSummary').catch(() => null),
+      backgroundHealthLine(),
     ]);
     state.diagnostics = info;
+    if (backgroundLine) info.backgroundLine = backgroundLine;
     els.diagText.textContent = formatDiagnostics(info, graph);
   } catch (err) {
     els.diagText.textContent = `诊断失败：${err.message}`;
@@ -895,6 +1214,9 @@ function openSettings() {
   els.captureAutoCommit.checked = state.captureSettings.autoCommit;
   for (const radio of document.querySelectorAll('input[name="mode"]')) {
     radio.checked = radio.value === state.mode;
+  }
+  for (const radio of document.querySelectorAll('input[name="feed-dose"]')) {
+    radio.checked = Number(radio.value) === state.feedSettings.dose;
   }
   fillProviderForm();
   openDialog(els.dialogSettings);
@@ -926,6 +1248,8 @@ async function clearAll() {
   try {
     await rpc('clear');
     closeDialogs();
+    state.feed.items = [];
+    state.feed.shown.clear();
     await refresh();
     toast('已清空全部本地数据');
   } catch (err) {
@@ -1162,7 +1486,8 @@ function shortStatement(statement, max = 26) {
 function paintPreview() {
   const capture = state.capture;
   if (!capture) return;
-  els.capturePreviewTitle.textContent = `预览：${capture.propositions.length} 条命题 · ${capture.plan.chains.length} 条推理链`;
+  const domain = typeof capture.plan.domain === 'string' && capture.plan.domain.length > 0 ? ` · 领域「${capture.plan.domain}」` : '';
+  els.capturePreviewTitle.textContent = `预览：${capture.propositions.length} 条命题 · ${capture.plan.chains.length} 条推理链${domain}`;
   paintProps();
   paintChains();
   paintDropped();
@@ -1315,6 +1640,9 @@ function collectPlanForCommit() {
     capture.propositions.filter((proposition) => proposition.checked).map((proposition) => proposition.ref),
   );
   const plan = {
+    // The domain is the interest signal; commitExtraction turns it into
+    // `interest.observed` + `proposition.domain`, so it must survive the filter.
+    ...(capture.plan.domain ? { domain: capture.plan.domain } : {}),
     create: capture.plan.create.filter((entry) => selected.has(entry.ref)),
     reuse: capture.plan.reuse.filter((entry) => selected.has(entry.ref)),
     cues: capture.plan.cues.filter((entry) => selected.has(entry.ref)),
@@ -1356,11 +1684,18 @@ async function confirmExtraction() {
       await refresh();
       return;
     }
-    const parts = [`已入库 ${result.counts.propositions} 条命题 / ${result.counts.chains} 条推理链`];
-    if (result.counts.reused > 0) parts.push(`复用已有 ${result.counts.reused} 条`);
-    if (result.counts.propositions === 0 && result.counts.chains === 0) parts.push('没有新的内容');
-    toast(parts.join('，'));
+    // A capture is an interest signal first, so the toast names the domain and
+    // the feed is immediately recomputed (the new domain reorders it).
+    if (result.domain) {
+      toast(`已加入「${result.domain}」· 今日推荐已更新`);
+    } else {
+      const parts = [`已入库 ${result.counts.propositions} 条命题 / ${result.counts.chains} 条推理链`];
+      if (result.counts.reused > 0) parts.push(`复用已有 ${result.counts.reused} 条`);
+      if (result.counts.propositions === 0 && result.counts.chains === 0) parts.push('没有新的内容');
+      toast(parts.join('，'));
+    }
     closeDialogs();
+    state.feed.items = [];
     await refresh();
   } catch (err) {
     if (state.silentCapture) openDialog(els.dialogCapture);
@@ -1436,6 +1771,17 @@ async function flushPersistence() {
 // ---------------------------------------------------------------------------
 
 function wire() {
+  // Surfaces: 今日推送 is the default; 复习队列 stays one click away.
+  els.tabFeed.addEventListener('click', () => setSurface('feed'));
+  els.tabReview.addEventListener('click', () => setSurface('queue'));
+
+  // Feed actions
+  els.btnFeedKnow.addEventListener('click', () => void feedExposure('engaged'));
+  els.btnFeedSkip.addEventListener('click', () => void feedExposure('skipped'));
+  els.btnFeedQuiz.addEventListener('click', startFeedQuiz);
+  els.btnFeedReview.addEventListener('click', () => setSurface('queue'));
+  els.btnFeedCapture.addEventListener('click', openCaptureDialog);
+
   // Empty state
   els.btnSample.addEventListener('click', () => void loadSamplePack());
   els.captureAutoCommit.addEventListener('change', onCaptureAutoCommitChange);
@@ -1461,6 +1807,7 @@ function wire() {
   // Done
   els.btnDoneExport.addEventListener('click', () => void exportLog());
   els.btnDoneRefresh.addEventListener('click', () => void refresh().catch((err) => toast(err.message)));
+  els.btnDoneFeed.addEventListener('click', () => setSurface('feed'));
 
   // Fatal
   els.btnRetry.addEventListener('click', () => {
@@ -1491,6 +1838,11 @@ function wire() {
   for (const radio of document.querySelectorAll('input[name="mode"]')) {
     radio.addEventListener('change', () => {
       if (radio.checked) setMode(radio.value);
+    });
+  }
+  for (const radio of document.querySelectorAll('input[name="feed-dose"]')) {
+    radio.addEventListener('change', () => {
+      if (radio.checked) onFeedDoseChange(radio.value);
     });
   }
   els.providerPreset.addEventListener('change', onProviderPresetChange);

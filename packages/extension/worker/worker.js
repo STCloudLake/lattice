@@ -72,13 +72,16 @@ function boot() {
 const OPS = {
   init: (service) => service.initPayload(),
   state: (service) => service.state(),
+  // M2a push layer: today's ad-like feed + C-ledger attention events.
+  feed: (service, args) => service.feed(args),
+  exposure: (service, args) => service.exposure(args),
   importPack: (service, args) => service.importPack(args.text),
   grade: (service, args) => service.grade(args),
   quiz: (service, args) => service.quiz(args),
   exportJsonl: (service) => service.exportJsonl(),
   importJsonl: (service, args) => service.importJsonl(args.text),
   clear: (service) => service.clear(),
-  diagnostics: (service) => service.diagnostics(),
+  diagnostics: (service, args) => service.diagnostics(args),
   flush: (service) => service.flush(),
   // M1a: extraction. All of the model call happens here (the page never talks
   // to the provider); the page only receives plain-JSON plans.

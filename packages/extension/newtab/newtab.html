@@ -11,8 +11,12 @@
       <header class="topbar">
         <div class="brand">
           <span class="brand-name">Lattice</span>
-          <span class="brand-tag">M0</span>
+          <span class="brand-tag">M2</span>
         </div>
+        <nav class="tabs" role="tablist" aria-label="视图">
+          <button class="tab is-active" id="tab-feed" type="button" role="tab" aria-selected="true">今日推送</button>
+          <button class="tab" id="tab-review" type="button" role="tab" aria-selected="false">复习 <span id="tab-review-count">0</span></button>
+        </nav>
         <div class="counters" aria-live="polite">
           <span class="counter" id="counter-review">复习 0</span>
           <span class="counter" id="counter-new">新学 0</span>
@@ -30,8 +34,8 @@
         <section class="panel center" id="view-empty" hidden>
           <h1>还没有命题</h1>
           <p class="muted lead">
-            Lattice 把知识拆成可追溯的命题，用两套独立的数字分别描述「懂没懂」和「忘没忘」。
-            先导入几条例题，就能在新标签页里开始复习。
+            Lattice 把知识拆成有先修结构的命题，像投放广告一样每天推一小剂量给你。
+            捕获一个你感兴趣的页面（或导入几条例题），新标签页就会开始「今日推送」。
           </p>
           <div class="row">
             <button class="btn primary" id="btn-sample" type="button">载入示例包</button>
@@ -39,7 +43,36 @@
             <button class="btn" id="btn-import-pack-file" type="button">导入 JSON 文件</button>
             <button class="btn" id="btn-paste-pack" type="button">粘贴 JSON</button>
           </div>
-          <p class="hint muted">M0 完全离线：没有网络请求、没有遥测，数据只在本机浏览器里。</p>
+          <p class="hint muted">完全离线：没有网络请求、没有遥测，数据只在本机浏览器里。</p>
+        </section>
+
+        <section class="panel feed-panel" id="view-feed" hidden>
+          <div class="feed" id="feed-card" hidden>
+            <div class="feed-badges">
+              <span class="badge badge-domain" id="feed-domain" hidden></span>
+              <span class="badge badge-reason" id="feed-reason" data-reason="foundation">基础</span>
+            </div>
+            <p class="feed-statement" id="feed-statement"></p>
+            <p class="feed-cue muted" id="feed-cue" hidden></p>
+            <p class="meta feed-meta" id="feed-meta"></p>
+            <p class="feed-source muted" id="feed-source"></p>
+            <div class="row feed-actions">
+              <button class="btn primary" id="btn-feed-know" type="button">知道了</button>
+              <button class="btn" id="btn-feed-skip" type="button">不感兴趣</button>
+              <button class="btn" id="btn-feed-quiz" type="button">考考我</button>
+            </div>
+            <p class="hint muted feed-progress" id="feed-progress"></p>
+          </div>
+          <p class="muted feed-loading" id="feed-loading" hidden>正在整理今日推送…</p>
+          <div class="center feed-done" id="feed-done" hidden>
+            <h1>今天的知识看完了 ✓</h1>
+            <p class="muted" id="feed-done-detail"></p>
+            <div class="row">
+              <button class="btn primary" id="btn-feed-review" type="button">去复习</button>
+              <button class="btn" id="btn-feed-capture" type="button">捕获新领域</button>
+            </div>
+            <p class="hint muted">在任意网页点 Lattice 图标可加新领域</p>
+          </div>
         </section>
 
         <section class="panel card-panel" id="view-card" tabindex="-1" hidden>
@@ -70,6 +103,7 @@
           <div class="row">
             <button class="btn primary" id="btn-done-export" type="button">导出 JSONL</button>
             <button class="btn" id="btn-done-refresh" type="button">刷新队列</button>
+            <button class="btn" id="btn-done-feed" type="button">今日推送</button>
           </div>
         </section>
 
@@ -160,6 +194,24 @@
           <p class="hint muted">
             关闭后每次捕获都会先展示命题与推理链，确认后才写入。开启时只给一条结果提示。
           </p>
+        </fieldset>
+        <fieldset class="fieldset">
+          <legend>推送</legend>
+          <p class="hint muted">
+            每日剂量：新标签页每次最多推几条。像广告一样小剂量、被动曝光，看完就完，不强制测验。
+          </p>
+          <label class="radio">
+            <input type="radio" name="feed-dose" value="3" checked />
+            3 条（默认）
+          </label>
+          <label class="radio">
+            <input type="radio" name="feed-dose" value="5" />
+            5 条
+          </label>
+          <label class="radio">
+            <input type="radio" name="feed-dose" value="10" />
+            10 条
+          </label>
         </fieldset>
         <fieldset class="fieldset">
           <legend>出题模式</legend>

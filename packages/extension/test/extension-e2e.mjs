@@ -58,6 +58,9 @@ const CAPTURE_TEXT = [
 ].join('\n');
 
 const STUB_EXTRACTION = {
+  // A capture is an interest signal first: the domain is part of the answer, so
+  // committing it must create `interest.observed` and stamp every proposition.
+  domain: '经济学',
   propositions: [
     {
       ref: 'p1',
@@ -204,8 +207,23 @@ class Cdp {
   }
 }
 
-function createHarness(page) {
-  let contextId;
+/** Reads the rendered 今日推送 card as plain data (no DOM internals leak). */
+async function readFeedCard(harness) {
+  const card = await harness.eval(`({
+    id: document.getElementById("feed-card").dataset.propositionId || "",
+    statement: document.getElementById("feed-statement").textContent,
+    cue: document.getElementById("feed-cue").hidden ? "" : document.getElementById("feed-cue").textContent,
+    meta: document.getElementById("feed-meta").textContent,
+    source: document.getElementById("feed-source").textContent,
+    domain: document.getElementById("feed-domain").textContent,
+    reason: document.getElementById("feed-reason").textContent,
+    remaining: Number(document.getElementById("feed-card").dataset.remaining) || 0,
+  })`);
+  card.summary = `[${card.reason}] ${card.statement} · ${card.meta} · ${card.source}`;
+  return card;
+}
+
+function createHarness(page) {  let contextId;
   return {
     async eval(expression) {
       const result = await page.send('Runtime.evaluate', {
@@ -329,7 +347,7 @@ async function main() {
 
     await harness.waitFor('document.readyState === "complete"', '页面 load');
     await harness.waitFor(
-      'document.getElementById("view-empty").hidden === false || document.getElementById("view-card").hidden === false || document.getElementById("view-fatal").hidden === false',
+      'document.getElementById("view-empty").hidden === false || document.getElementById("view-feed").hidden === false || document.getElementById("view-fatal").hidden === false',
       'worker 初始化完成',
     );
 
@@ -345,51 +363,108 @@ async function main() {
     console.log(`empty:   ${emptyCounters}`);
     assert.match(emptyCounters, /复习 0/);
 
-    // 1) import the sample pack (8 propositions / 12 cues)
+    // 1) import the sample pack (8 propositions / 12 cues). The default surface
+    //    is now 今日推送 (ad-like feed), not the review card.
     await harness.eval('document.getElementById("btn-sample").click()');
     await harness.waitFor('document.getElementById("counter-total").textContent.includes("8")', '示例包导入');
     const counts = await harness.eval(
       '["counter-review","counter-new","counter-total"].map((id) => document.getElementById(id).textContent).join(" / ")',
     );
+    await harness.waitFor(
+      'document.getElementById("view-feed").hidden === false && document.getElementById("feed-card").hidden === false',
+      '今日推送首条',
+    );
+    const firstFeed = await readFeedCard(harness);
+    console.log(`import:  ${counts}`);
+    console.log(`feed:    ${firstFeed.summary}`);
+    assert.ok(firstFeed.statement.length > 0, '推送命题为空');
+    assert.match(firstFeed.reason, /基础|前沿|复习/);
+    assert.ok(firstFeed.domain.length > 0, '推送卡片应带领域徽标');
+    assert.match(firstFeed.meta, /掌握 \d+% · R \d+%/);
+    assert.match(firstFeed.source, /^来自「.+」$/);
+    assert.ok(firstFeed.remaining >= 1 && firstFeed.remaining <= 3, '今日剩余条数应在剂量内');
+    const seenFeedIds = new Set([firstFeed.id]);
+
+    // 2) 知道了 -> engaged, then the feed advances to the next card.
+    await harness.eval('document.getElementById("btn-feed-know").click()');
+    await harness.waitFor(
+      `document.getElementById("feed-card").hidden === false && document.getElementById("feed-card").dataset.propositionId !== ${JSON.stringify(
+        firstFeed.id,
+      )}`,
+      '知道了 -> 下一张',
+    );
+    const secondFeed = await readFeedCard(harness);
+    console.log(`feed:    知道了 -> ${secondFeed.statement.slice(0, 22)}…`);
+    seenFeedIds.add(secondFeed.id);
+
+    // 3) 复习队列 stays one click away; the M0 review/quiz flow must keep working.
+    await harness.eval('document.getElementById("tab-review").click()');
+    await harness.waitFor('document.getElementById("view-card").hidden === false', '进入复习队列');
     const front = await harness.eval('document.getElementById("card-front").textContent');
     const meta = await harness.eval('document.getElementById("card-meta").textContent');
-    console.log(`import:  ${counts}`);
-    console.log(`card:    ${front}`);
+    console.log(`review:  ${front}`);
     console.log(`meta:    ${meta}`);
     assert.equal(front.length > 0, true, '卡片正面为空');
     assert.match(meta, /掌握 .+% ±.+% · 可用 .+% · 复习 \d+ 次/);
 
-    // 2) keyboard only: Space reveals, 3 rates "一般"
+    // keyboard only inside the queue: Space reveals, 3 rates "一般"
     await harness.key(' ', 'Space', 32);
     await harness.waitFor('document.getElementById("card-answer").hidden === false', '空格显示答案');
     await harness.key('3', 'Digit3', 51);
     await harness.waitFor('document.getElementById("counter-new").textContent.includes("7")', '数字键 3 评级');
     console.log(`grade:   数字键 3 → ${await harness.eval('document.getElementById("counter-new").textContent')}`);
 
-    // 3) diagnostics panel must report storage mode + calibration report
+    // back to the feed surface for the remaining checks
+    await harness.eval('document.getElementById("tab-feed").click()');
+    await harness.waitFor(
+      'document.getElementById("view-feed").hidden === false && document.getElementById("feed-card").hidden === false',
+      '回到今日推送',
+    );
+
+    // 4) diagnostics panel must report storage mode + calibration + push facts
     await harness.eval('document.getElementById("btn-diagnostics").click()');
     await harness.waitFor('document.getElementById("diag-text").textContent.includes("校验摘要")', '诊断面板');
     const diagnostics = await harness.eval('document.getElementById("diag-text").textContent');
     const storageLine = diagnostics.split('\n').find((line) => line.startsWith('存储:')) ?? '(缺失)';
     const vfsLine = diagnostics.split('\n').find((line) => line.trim().startsWith('VFS:')) ?? '(无 VFS 行)';
+    const feedLine = diagnostics.split('\n').find((line) => line.startsWith('推送:')) ?? '(缺失)';
+    const backgroundLine = diagnostics.split('\n').find((line) => line.startsWith('后台:')) ?? '(缺失)';
     console.log(`diag:    ${storageLine.trim()} · ${vfsLine.trim()}`);
+    console.log(`diag:    ${feedLine.trim()}`);
+    console.log(`diag:    ${backgroundLine.trim()}`);
     assert.match(diagnostics, /存储: (OPFS|回退\(chrome\.storage\))/);
     assert.match(diagnostics, /校准报告/);
     assert.match(diagnostics, /事件 2\d/);
+    assert.match(diagnostics, /^推送: 每日 3 条 · 今日已展示 \d+ · 参与 \d+ · 跳过 \d+ · 兴趣 /m);
+    assert.match(diagnostics, /^后台: /m);
     await harness.eval('document.getElementById("btn-diag-close").click()');
 
-    // 4) reload: the event log must survive (OPFS or chrome.storage fallback)
+    // 5) reload: the event log must survive (OPFS or chrome.storage fallback) and
+    //    today's already-shown cards must not be pushed again.
     await pageClient.send('Page.reload', { ignoreCache: true });
     await harness.waitFor('document.readyState === "complete"', 'reload');
     await harness.waitFor(
-      'document.getElementById("view-card").hidden === false || document.getElementById("view-empty").hidden === false',
+      'document.getElementById("view-feed").hidden === false || document.getElementById("view-empty").hidden === false',
       'reload 后 worker 初始化',
     );
     await harness.waitFor('document.getElementById("counter-total").textContent.includes("8")', 'reload 后数据仍在');
     const afterReload = await harness.eval(
       '["counter-new","counter-total"].map((id) => document.getElementById(id).textContent).join(" / ")',
     );
+    await harness.waitFor(
+      'document.getElementById("feed-card").hidden === false || document.getElementById("feed-done").hidden === false',
+      'reload 后推送视图',
+    );
+    const reloadFeedDone = await harness.eval('document.getElementById("feed-done").hidden === false');
     console.log(`reload:  ${afterReload}（事件日志持久化成功）`);
+    if (reloadFeedDone) {
+      console.log('feed:    reload → 今天的知识看完了 ✓（当天剂量已用完）');
+    } else {
+      const afterReloadFeed = await readFeedCard(harness);
+      console.log(`feed:    reload → ${afterReloadFeed.statement.slice(0, 22)}…`);
+      assert.ok(!seenFeedIds.has(afterReloadFeed.id), 'reload 后同一天不应重复推送已展示命题');
+      seenFeedIds.add(afterReloadFeed.id);
+    }
 
     // 5) M1a acceptance: configure the stub provider through the UI, capture
     //    text, inspect the preview, confirm it, and check the counters/coverage.
@@ -472,20 +547,89 @@ async function main() {
     assert.equal(previewStats.checkedProps, 3, '命题应默认全选');
     assert.equal(previewStats.checkedChains, 1, '强度 ≥ 0.5 的推理链应默认勾选');
     assert.match(previewStats.chainText, /前提 .+ ⟹ 结论 /);
+    assert.match(previewStats.title, /领域「经济学」/, '预览应显示模型抽到的领域');
     assert.equal(previewStats.droppedHidden, true, '没有丢弃项时不应显示丢弃列表');
     assert.ok(stub.requests.length >= 2, `stub 应收到抽取 + 去重两次调用（实际 ${stub.requests.length}）`);
 
     await harness.eval('document.getElementById("btn-capture-confirm").click()');
     await harness.waitFor(
-      'document.getElementById("toast").textContent.includes("已入库 3 条命题")',
-      '确认入库 toast',
+      'document.getElementById("toast").textContent.includes("已加入「经济学」")',
+      '确认入库 toast（领域 = 兴趣信号）',
       30000,
     );
     await harness.waitFor('document.getElementById("counter-total").textContent.includes("11")', '入库后计数器更新');
     const afterCapture = await harness.eval(
       '["counter-review","counter-new","counter-total"].map((id) => document.getElementById(id).textContent).join(" / ")',
     );
+    const captureToast = await harness.eval('document.getElementById("toast").textContent');
     console.log(`入库:    ${afterCapture}（8 条示例命题 + 3 条捕获）`);
+    console.log(`toast:   ${captureToast}`);
+    assert.match(captureToast, /已加入「经济学」· 今日推荐已更新/);
+
+    // The feed must be recomputed right after a capture commit (interest added).
+    await harness.waitFor(
+      'document.getElementById("view-feed").hidden === false && document.getElementById("feed-card").hidden === false',
+      '入库后推送刷新',
+    );
+    const feedAfterCapture = await readFeedCard(harness);
+    console.log(`feed:    入库后 -> ${feedAfterCapture.summary}`);
+    assert.match(feedAfterCapture.source, /^来自「经济学」$/, '捕获领域应参与推送排序');
+    seenFeedIds.add(feedAfterCapture.id);
+
+    // 6) feed micro-actions: 知道了 logs engaged, 不感兴趣 logs skipped, both advance.
+    const knowTarget = feedAfterCapture.id;
+    await harness.eval('document.getElementById("btn-feed-know").click()');
+    await harness.waitFor(
+      `document.getElementById("feed-card").hidden === false && document.getElementById("feed-card").dataset.propositionId !== ${JSON.stringify(
+        knowTarget,
+      )}`,
+      '知道了 -> 下一张（入库后）',
+    );
+    const afterKnow = await readFeedCard(harness);
+    console.log(`feed:    知道了 -> ${afterKnow.statement.slice(0, 22)}…`);
+    seenFeedIds.add(afterKnow.id);
+
+    const skipTarget = afterKnow.id;
+    await harness.eval('document.getElementById("btn-feed-skip").click()');
+    await harness.waitFor(
+      `document.getElementById("feed-card").hidden === false && document.getElementById("feed-card").dataset.propositionId !== ${JSON.stringify(
+        skipTarget,
+      )}`,
+      '不感兴趣 -> 下一张',
+    );
+    const afterSkip = await readFeedCard(harness);
+    console.log(`feed:    不感兴趣 -> ${afterSkip.statement.slice(0, 22)}…`);
+    seenFeedIds.add(afterSkip.id);
+
+    // 考考我: verification is optional but reachable — reuse the card flow in quiz mode.
+    await harness.eval('document.getElementById("btn-feed-quiz").click()');
+    await harness.waitFor('document.getElementById("view-card").hidden === false', '考考我 -> 卡片视图');
+    await harness.key(' ', 'Space', 32);
+    await harness.waitFor('document.getElementById("card-answer").hidden === false', '考考我 显示答案');
+    const quizModeOk = await harness.eval(
+      'document.getElementById("actions-quiz").hidden === false && document.getElementById("actions-grade").hidden === true',
+    );
+    assert.equal(quizModeOk, true, '考考我应进入测验模式（只判对错，不写调度账）');
+    await harness.key('1', 'Digit1', 49);
+    await harness.waitFor(
+      'document.getElementById("view-feed").hidden === false && (document.getElementById("feed-card").hidden === false || document.getElementById("feed-done").hidden === false)',
+      '考考我 后回到推送',
+    );
+    const afterQuizDone = await harness.eval('document.getElementById("feed-done").hidden === false');
+    if (!afterQuizDone) {
+      const afterQuizFeed = await readFeedCard(harness);
+      console.log(`feed:    考考我 -> ${afterQuizFeed.statement.slice(0, 22)}…`);
+      seenFeedIds.add(afterQuizFeed.id);
+    }
+
+    // C ledger evidence: diagnostics must show 2 engaged / 1 skipped / shown today.
+    await harness.eval('document.getElementById("btn-diagnostics").click()');
+    await harness.waitFor('document.getElementById("diag-text").textContent.includes("推送:")', '诊断推送信息');
+    const diagFeedAfter = await harness.eval('document.getElementById("diag-text").textContent');
+    const feedLineAfter = diagFeedAfter.split('\n').find((line) => line.startsWith('推送:')) ?? '(缺失)';
+    console.log(`diag:    ${feedLineAfter.trim()}`);
+    assert.match(feedLineAfter, /^推送: 每日 3 条 · 今日已展示 \d+ · 参与 2 · 跳过 1 · 兴趣 经济学×1/);
+    await harness.eval('document.getElementById("btn-diag-close").click()');
 
     // coverage: capturing the same text again must be short-circuited.
     const requestsBeforeCoverage = stub.requests.length;
@@ -555,14 +699,81 @@ async function main() {
     await pageClient.send('Page.reload', { ignoreCache: true });
     await harness.waitFor('document.readyState === "complete"', 'reload(auto)');
     await harness.waitFor(
-      'document.getElementById("toast").textContent.includes("已入库")',
-      '自动入库 toast',
+      'document.getElementById("toast").textContent.includes("已加入「经济学」")',
+      '自动入库 toast（领域）',
       60000,
     );
     const autoDialogOpen = await harness.eval('document.getElementById("dialog-capture").open');
     const autoToast = await harness.eval('document.getElementById("toast").textContent');
     console.log(`auto:    ${autoToast}`);
     assert.equal(autoDialogOpen, false, '自动入库时不应打开确认弹窗');
+
+    // 8) 推送设置：每日剂量写入 chrome.storage.local，并在诊断里显示
+    await harness.eval('document.getElementById("btn-settings").click()');
+    await harness.waitFor('document.getElementById("dialog-settings").open === true', '设置（推送剂量）');
+    await harness.eval(`
+      (() => {
+        const radio = document.querySelector('input[name="feed-dose"][value="5"]');
+        radio.checked = true;
+        radio.dispatchEvent(new Event('change', { bubbles: true }));
+      })()
+    `);
+    await harness.waitFor(
+      'document.getElementById("toast").textContent.includes("每日剂量已设为 5 条")',
+      '每日剂量设置 toast',
+    );
+    const storedFeedSettings = await harness.eval(
+      'chrome.storage.local.get("latticeFeedSettings").then((got) => JSON.stringify(got.latticeFeedSettings))',
+    );
+    console.log(`settings: ${storedFeedSettings}`);
+    assert.equal(storedFeedSettings, '{"dose":5}', '每日剂量应持久化到 chrome.storage.local');
+    await harness.eval('document.getElementById("btn-settings-close").click()');
+    await harness.eval('document.getElementById("btn-diagnostics").click()');
+    await harness.waitFor(
+      'document.getElementById("diag-text").textContent.includes("推送: 每日 5 条")',
+      '诊断显示当前剂量',
+    );
+    await harness.eval('document.getElementById("btn-diag-close").click()');
+
+    // 9) exhaust the feed: the empty state is "今天的知识看完了 ✓" with a review entry.
+    await harness.waitFor(
+      'document.getElementById("view-feed").hidden === false && (document.getElementById("feed-card").hidden === false || document.getElementById("feed-done").hidden === false)',
+      '推送视图（清空前）',
+    );
+    const alreadyDone = await harness.eval('document.getElementById("feed-done").hidden === false');
+    if (!alreadyDone) {
+      for (let i = 0; i < 12; i += 1) {
+        const done = await harness.eval('document.getElementById("feed-done").hidden === false');
+        if (done) break;
+        const cardVisible = await harness.eval('document.getElementById("feed-card").hidden === false');
+        if (!cardVisible) {
+          await sleep(150);
+          continue;
+        }
+        const currentId = await harness.eval('document.getElementById("feed-card").dataset.propositionId');
+        await harness.eval('document.getElementById("btn-feed-know").click()');
+        await harness.waitFor(
+          `document.getElementById("feed-done").hidden === false || document.getElementById("feed-card").dataset.propositionId !== ${JSON.stringify(
+            currentId,
+          )}`,
+          `推送清空推进（${i + 1}）`,
+          15000,
+        );
+      }
+    }
+    await harness.waitFor('document.getElementById("feed-done").hidden === false', '今天的知识看完了 ✓');
+    const feedDoneText = await harness.eval('document.getElementById("feed-done").textContent');
+    console.log(`feed:    ${feedDoneText.replace(/\s+/g, ' ').trim().slice(0, 70)}`);
+    assert.match(feedDoneText, /今天的知识看完了 ✓/);
+    assert.match(feedDoneText, /去复习/);
+    assert.match(feedDoneText, /在任意网页点 Lattice 图标可加新领域/);
+    await harness.eval('document.getElementById("btn-feed-review").click()');
+    await harness.waitFor(
+      'document.getElementById("view-card").hidden === false || document.getElementById("view-done").hidden === false',
+      '空状态「去复习」进入复习队列',
+    );
+    await harness.eval('document.getElementById("tab-feed").click()');
+    await harness.waitFor('document.getElementById("view-feed").hidden === false', '回到今日推送');
 
     // 7) second tab in the same profile: must at least boot without fatal errors
     const secondTarget = await fetch(`${BASE}/json/new?${encodeURIComponent(pageUrl)}`, { method: 'PUT' }).then((response) =>
@@ -578,7 +789,7 @@ async function main() {
     await sleep(300);
     await secondHarness.waitFor('document.readyState === "complete"', '第二个标签页 load');
     await secondHarness.waitFor(
-      'document.getElementById("view-empty").hidden === false || document.getElementById("view-card").hidden === false || document.getElementById("view-fatal").hidden === false',
+      'document.getElementById("view-empty").hidden === false || document.getElementById("view-feed").hidden === false || document.getElementById("view-fatal").hidden === false',
       '第二个标签页 worker 初始化',
     );
     const secondFatal = await secondHarness.eval('document.getElementById("view-fatal").hidden === false');
@@ -601,7 +812,7 @@ async function main() {
     }
     assert.equal(realErrors.length, 0, `页面出现 ${realErrors.length} 条 console 错误`);
     console.log('console: 无错误 / 无 CSP 违规');
-    console.log('\nE2E OK: MV3 扩展在真实浏览器中加载、导入、答题、诊断、持久化全部通过');
+    console.log('\nE2E OK: MV3 扩展在真实浏览器中加载、推送、复习、诊断、捕获、持久化全部通过');
   } finally {
     pageClient?.close();
     browser.kill();
