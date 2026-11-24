@@ -152,6 +152,16 @@
           <dd id="set-digest">—</dd>
         </dl>
         <fieldset class="fieldset">
+          <legend>捕获与入库</legend>
+          <label class="radio">
+            <input type="checkbox" id="capture-auto-commit" checked />
+            捕获后自动入库（跳过预览确认，推荐）
+          </label>
+          <p class="hint muted">
+            关闭后每次捕获都会先展示命题与推理链，确认后才写入。开启时只给一条结果提示。
+          </p>
+        </fieldset>
+        <fieldset class="fieldset">
           <legend>出题模式</legend>
           <label class="radio">
             <input type="radio" name="mode" value="review" checked />

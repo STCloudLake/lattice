@@ -16,6 +16,7 @@ const RPC_TIMEOUTS = { extractPreview: 150000, providerTest: 75000, commitExtrac
 /** One storage key holds the whole provider config — and nothing else holds the key. */
 const PROVIDER_STORAGE_KEY = 'latticeProvider';
 const PENDING_CAPTURE_KEY = 'latticePendingCapture';
+const CAPTURE_SETTINGS_KEY = 'latticeCaptureSettings';
 
 // Model names are NOT hardcoded per vendor: they change (DeepSeek renamed
 // deepseek-chat to deepseek-flash). The UI can pull the real list from /models.
@@ -50,6 +51,7 @@ const els = {
 
   btnSample: $('btn-sample'),
   btnCaptureTop: $('btn-capture-top'),
+  captureAutoCommit: $('capture-auto-commit'),
   btnCaptureEmpty: $('btn-capture-empty'),
   btnImportPackFile: $('btn-import-pack-file'),
   btnPastePack: $('btn-paste-pack'),
@@ -159,6 +161,8 @@ const state = {
   mode: 'review', // 'review' | 'quiz'
   captureSourceKind: 'paste',
   captureSourceUri: '',
+  captureSettings: { autoCommit: true },
+  silentCapture: false,
   payload: null,
   card: null,
   cardShownAt: 0,
@@ -254,6 +258,40 @@ function sanitizeProviderConfig(value) {
   const disableThinking = value.disableThinking !== false;
   if (!baseUrl && !model && !apiKey) return null;
   return { preset, baseUrl, model, apiKey, disableThinking };
+}
+
+async function loadCaptureSettings() {
+  const area = storageArea();
+  if (!area) return;
+  try {
+    const got = (await area.get(CAPTURE_SETTINGS_KEY)) ?? {};
+    const value = got[CAPTURE_SETTINGS_KEY];
+    if (value && typeof value === 'object') {
+      state.captureSettings.autoCommit = value.autoCommit !== false;
+    }
+  } catch {
+    /* defaults are fine; settings must never block boot */
+  }
+}
+
+async function persistCaptureSettings() {
+  const area = storageArea();
+  if (!area) return;
+  try {
+    await area.set({ [CAPTURE_SETTINGS_KEY]: state.captureSettings });
+  } catch {
+    toast('保存设置失败');
+  }
+}
+
+function onCaptureAutoCommitChange() {
+  state.captureSettings.autoCommit = els.captureAutoCommit.checked;
+  void persistCaptureSettings();
+  toast(
+    state.captureSettings.autoCommit
+      ? '已开启自动入库：捕获后直接写入，只提示结果'
+      : '已关闭自动入库：每次捕获都会先展示预览',
+  );
 }
 
 async function loadProviderConfig() {
@@ -495,6 +533,7 @@ async function boot() {
   showView('loading');
   try {
     await loadProviderConfig();
+    await loadCaptureSettings();
     const init = await rpc('init');
     if (init.storage === 'fallback') {
       const detail = init.persisted ? 'chrome.storage 持久化' : '仅内存（未检测到 chrome.storage）';
@@ -853,6 +892,7 @@ function openSettings() {
     els.setSeq.textContent = String(payload.lastSeq);
     els.setDigest.textContent = payload.digest;
   }
+  els.captureAutoCommit.checked = state.captureSettings.autoCommit;
   for (const radio of document.querySelectorAll('input[name="mode"]')) {
     radio.checked = radio.value === state.mode;
   }
@@ -927,8 +967,8 @@ async function consumePendingCapture() {
     /* ignoring: the payload is consumed in this page anyway */
   }
 
-  openCaptureDialog();
   if (!pending.ok) {
+    openCaptureDialog();
     showCaptureError(`无法捕获这个页面：${pending.reason || '未知原因'}`);
     return;
   }
@@ -937,19 +977,38 @@ async function consumePendingCapture() {
   els.captureText.value = pending.text || '';
   state.captureSourceKind = 'page';
   state.captureSourceUri = pending.url || '';
-  paintCaptureProviderLine();
-
-  if (pending.truncated) {
-    toast('页面正文较长，已截断到约 12000 字', 4800);
-  } else {
-    toast(pending.hasSelection ? '已抓取选中文字，正在抽取…' : '已抓取页面正文，正在抽取…');
-  }
 
   if (state.provider && providerReady(state.provider)) {
+    if (state.captureSettings.autoCommit) {
+      // No dialog at all: progress and result are a toast, the queue refresh is
+      // the visible feedback. Errors still open the dialog.
+      state.silentCapture = true;
+      toast(
+        pending.truncated
+          ? '页面正文较长，已截断；正在自动入库…'
+          : pending.hasSelection
+            ? '正在把选中文字自动入库…'
+            : '正在抓取并自动入库…',
+        6000,
+      );
+      await runExtraction(false);
+      return;
+    }
+    openCaptureDialog();
+    els.captureTitle.value = pending.title || '';
+    els.captureText.value = pending.text || '';
+    paintCaptureProviderLine();
+    if (pending.truncated) toast('页面正文较长，已截断到约 12000 字', 4800);
+    else toast(pending.hasSelection ? '已抓取选中文字，正在抽取…' : '已抓取页面正文，正在抽取…');
     void runExtraction(false);
-  } else {
-    showCaptureError('正文已抓取。请先点右上角 ⚙ 配置模型，然后点「抽取」。');
+    return;
   }
+
+  openCaptureDialog();
+  els.captureTitle.value = pending.title || '';
+  els.captureText.value = pending.text || '';
+  paintCaptureProviderLine();
+  showCaptureError('正文已抓取。请先点右上角 ⚙ 配置模型，然后点「抽取」。');
 }
 
 function openCaptureDialog() {
@@ -1023,6 +1082,7 @@ async function runExtraction(force = false) {
     return;
   }
   if (!state.provider || !providerReady(state.provider)) {
+    if (state.silentCapture) openDialog(els.dialogCapture);
     showCaptureError('尚未配置模型：请点右上角 ⚙，在「模型」里填写接口地址、模型名称和 API Key。');
     return;
   }
@@ -1057,13 +1117,24 @@ async function runExtraction(force = false) {
       model: result.model,
       providerLabel: result.providerLabel,
     };
+    // Lightweight by default: skip the confirmation step entirely. The toggle in
+    // 设置 brings the preview back for users who want to review every capture.
+    if (state.captureSettings.autoCommit) {
+      // confirmExtraction refuses to run while a capture is marked busy, so hand
+      // the baton over explicitly instead of returning silently.
+      setCaptureBusy(false);
+      await confirmExtraction();
+      return;
+    }
     paintPreview();
     els.capturePreview.hidden = false;
   } catch (err) {
+    if (state.silentCapture) openDialog(els.dialogCapture);
     showCaptureError(captureErrorText(err));
   } finally {
     els.captureStatus.hidden = true;
     setCaptureBusy(false);
+    state.silentCapture = false;
   }
 }
 
@@ -1292,6 +1363,7 @@ async function confirmExtraction() {
     closeDialogs();
     await refresh();
   } catch (err) {
+    if (state.silentCapture) openDialog(els.dialogCapture);
     showCaptureError(captureErrorText(err));
   } finally {
     setCaptureBusy(false);
@@ -1366,6 +1438,7 @@ async function flushPersistence() {
 function wire() {
   // Empty state
   els.btnSample.addEventListener('click', () => void loadSamplePack());
+  els.captureAutoCommit.addEventListener('change', onCaptureAutoCommitChange);
   els.btnCaptureTop.addEventListener('click', openCaptureDialog);
   els.btnCaptureEmpty.addEventListener('click', openCaptureDialog);
   els.btnImportPackFile.addEventListener('click', () => els.filePack.click());

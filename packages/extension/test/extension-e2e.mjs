@@ -426,6 +426,19 @@ async function main() {
     );
     const testStatus = await harness.eval('document.getElementById("provider-status").textContent');
     console.log(`test:    ${testStatus}`);
+
+    // Auto-commit is ON by default; turn it OFF to exercise the preview path.
+    await harness.eval(`
+      (() => {
+        const box = document.getElementById('capture-auto-commit');
+        box.checked = false;
+        box.dispatchEvent(new Event('change', { bubbles: true }));
+      })()
+    `);
+    await harness.waitFor(
+      'document.getElementById("toast").textContent.includes("已关闭自动入库")',
+      '关闭自动入库',
+    );
     await harness.eval('document.getElementById("btn-settings-close").click()');
 
     await harness.eval('document.getElementById("btn-capture").click()');
@@ -508,7 +521,50 @@ async function main() {
     assert.doesNotMatch(diagAfterCapture, /sk-/);
     await harness.eval('document.getElementById("btn-diag-close").click()');
 
-    // 6) second tab in the same profile: must at least boot without fatal errors
+    // 6) auto-commit path: a toolbar capture must not open a confirmation dialog
+    await harness.eval('document.getElementById("btn-settings").click()');
+    await harness.eval(`
+      (() => {
+        const box = document.getElementById('capture-auto-commit');
+        box.checked = true;
+        box.dispatchEvent(new Event('change', { bubbles: true }));
+      })()
+    `);
+    await harness.waitFor(
+      'document.getElementById("toast").textContent.includes("已开启自动入库")',
+      '开启自动入库',
+    );
+    await harness.eval('document.getElementById("btn-settings-close").click()');
+
+    const AUTO_TEXT =
+      '沉没成本是已经发生且无法收回的成本。理性决策只应看未来的边际收益与边际成本，而不应被沉没成本左右。';
+    const pendingCapture = {
+      ok: true,
+      reason: '',
+      capturedAt: new Date().toISOString(),
+      selectionOnly: false,
+      title: '自动入库测试',
+      url: 'https://example.com/auto',
+      text: AUTO_TEXT,
+      truncated: false,
+      charCount: AUTO_TEXT.length,
+    };
+    await harness.eval(
+      `chrome.storage.local.set({ latticePendingCapture: ${JSON.stringify(pendingCapture)} })`,
+    );
+    await pageClient.send('Page.reload', { ignoreCache: true });
+    await harness.waitFor('document.readyState === "complete"', 'reload(auto)');
+    await harness.waitFor(
+      'document.getElementById("toast").textContent.includes("已入库")',
+      '自动入库 toast',
+      60000,
+    );
+    const autoDialogOpen = await harness.eval('document.getElementById("dialog-capture").open');
+    const autoToast = await harness.eval('document.getElementById("toast").textContent');
+    console.log(`auto:    ${autoToast}`);
+    assert.equal(autoDialogOpen, false, '自动入库时不应打开确认弹窗');
+
+    // 7) second tab in the same profile: must at least boot without fatal errors
     const secondTarget = await fetch(`${BASE}/json/new?${encodeURIComponent(pageUrl)}`, { method: 'PUT' }).then((response) =>
       response.json(),
     );
@@ -535,7 +591,7 @@ async function main() {
     console.log(`2nd tab storage: ${secondStorage.trim()}`);
     second.close();
 
-    // 7) no uncaught errors / CSP violations
+    // 8) no uncaught errors / CSP violations
     const realErrors = consoleErrors.filter(
       (entry) => !entry.includes('favicon') && !entry.includes('net::ERR_FILE_NOT_FOUND'),
     );
