@@ -4,14 +4,38 @@
  * Owns the UI only. Every database read/write goes through a tiny RPC to
  * ../worker/worker.js, because the OPFS SQLite VFS only runs inside a Web Worker.
  * Plain JS, no framework, no external assets, keyboard first.
+ *
+ * M2c adds declared interests + autonomous curriculum preparation: the page
+ * decides *when* to generate (once per domain per day, never twice at once) and
+ * the worker owns the event log and the model call.
  */
+
+import {
+  CURRICULUM_STATE_KEY,
+  levelLabel,
+  loadCurriculumState,
+  localDayKey,
+  markGeneratedForDay,
+  normalizeLevel,
+  planNextGeneration,
+  saveCurriculumState,
+} from './curriculum-guard.js';
 
 const SAMPLE_PACK_URL = new URL('../data/sample-pack.json', import.meta.url);
 const RPC_REQUEST = 'lattice-rpc';
 const RPC_RESULT = 'lattice-rpc-result';
 const RPC_TIMEOUT_MS = 30000;
 /** Long operations need more than the default RPC timeout. */
-const RPC_TIMEOUTS = { extractPreview: 150000, providerTest: 75000, commitExtraction: 60000 };
+const RPC_TIMEOUTS = {
+  extractPreview: 150000,
+  providerTest: 75000,
+  commitExtraction: 60000,
+  // One curriculum batch is one model call, same order of magnitude as extraction.
+  generateCurriculum: 150000,
+  seedCurriculum: 60000,
+};
+/** How many propositions one autonomous curriculum batch asks for. */
+const CURRICULUM_BATCH = 6;
 
 /** One storage key holds the whole provider config — and nothing else holds the key. */
 const PROVIDER_STORAGE_KEY = 'latticeProvider';
@@ -70,6 +94,7 @@ const els = {
   feedMeta: $('feed-meta'),
   feedSource: $('feed-source'),
   feedProgress: $('feed-progress'),
+  feedHint: $('feed-hint'),
   btnFeedKnow: $('btn-feed-know'),
   btnFeedSkip: $('btn-feed-skip'),
   btnFeedQuiz: $('btn-feed-quiz'),
@@ -77,6 +102,7 @@ const els = {
   btnFeedCapture: $('btn-feed-capture'),
 
   btnSample: $('btn-sample'),
+  btnSeed: $('btn-seed'),
   btnCaptureTop: $('btn-capture-top'),
   captureAutoCommit: $('capture-auto-commit'),
   btnCaptureEmpty: $('btn-capture-empty'),
@@ -136,6 +162,13 @@ const els = {
   setSeq: $('set-seq'),
   setDigest: $('set-digest'),
   btnSettingsClose: $('btn-settings-close'),
+
+  // 兴趣领域: declared interests are events in the C ledger, this section is a view.
+  interestList: $('interest-list'),
+  interestDomain: $('interest-domain'),
+  interestLevel: $('interest-level'),
+  btnInterestAdd: $('btn-interest-add'),
+  interestStatus: $('interest-status'),
 
   providerPreset: $('provider-preset'),
   providerBaseUrl: $('provider-base-url'),
@@ -208,6 +241,17 @@ const state = {
     today: '',
     shown: new Set(), // `${day}|${propositionId}` already logged in this page
     busy: false,
+  },
+  // M2c: declared interests and the autonomous-preparation guard. The persisted
+  // once-per-day map is chrome.storage.local.latticeCurriculumState; `attempted`
+  // only stops a loop inside this page session.
+  curriculum: {
+    busy: false,
+    attempted: new Set(),
+    dayState: {},
+    needs: [],
+    interests: [],
+    emptyChecked: false,
   },
   answered: new Set(), // queue keys answered in this page session (quiz mode needs it)
   diagnostics: null,
@@ -378,6 +422,228 @@ function onFeedDoseChange(dose) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 兴趣领域 + 自主准备内容 (M2c)
+//
+// Interests are events in the C ledger (the worker owns them); this module only
+// renders them and decides *when* to ask for content. The one-per-domain-per-day
+// rule lives in curriculum-guard.js so it is testable outside the browser.
+// ---------------------------------------------------------------------------
+
+/** Non-blocking line under the feed card ("正在为…准备内容" / "点 ⚙ 配置模型…"). */
+function paintFeedHint(text, { tone = 'hint' } = {}) {
+  if (!els.feedHint) return;
+  els.feedHint.textContent = text || '';
+  els.feedHint.hidden = !text;
+  els.feedHint.classList.toggle('error', tone === 'error');
+}
+
+function setInterestStatus(message, isError = false) {
+  if (!els.interestStatus) return;
+  els.interestStatus.textContent = message || '';
+  els.interestStatus.hidden = !message;
+  els.interestStatus.classList.toggle('error', Boolean(isError));
+}
+
+/** Declared interests only: inferred ones are shown in 诊断, not editable here. */
+function declaredInterests() {
+  return state.curriculum.interests.filter((entry) => entry && entry.declared);
+}
+
+/** Reads needs/interests + the persisted once-per-day guard from all sources. */
+async function refreshCurriculumMeta() {
+  try {
+    const result = await rpc('curriculumNeeds');
+    state.curriculum.needs = Array.isArray(result?.needs) ? result.needs : [];
+    state.curriculum.interests = Array.isArray(result?.interests) ? result.interests : [];
+  } catch {
+    // The list is a view; a failed read must never block the feed.
+  }
+  state.curriculum.dayState = await loadCurriculumState(storageArea());
+}
+
+/** 领域名 · 水平 · [移除] */
+function interestRow(entry) {
+  const row = document.createElement('div');
+  row.className = 'interest-row';
+  row.dataset.domain = entry.name;
+  const name = document.createElement('span');
+  name.className = 'interest-name';
+  name.textContent = entry.name;
+  const level = document.createElement('span');
+  level.className = 'interest-level';
+  level.textContent = levelLabel(entry.level);
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'interest-remove';
+  remove.textContent = '移除';
+  remove.title = `不再主动为「${entry.name}」准备内容（捕获记录保留）`;
+  remove.addEventListener('click', () => void onRemoveInterest(entry.name));
+  row.append(name, document.createTextNode(' · '), level, document.createTextNode(' · '), remove);
+  const count = Number(entry.captureCount) || 0;
+  if (count > 0) row.title = `捕获过 ${count} 次`;
+  return row;
+}
+
+function paintInterestSettings() {
+  if (!els.interestList) return;
+  els.interestList.replaceChildren();
+  const declared = declaredInterests();
+  if (declared.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'interest-empty';
+    empty.textContent = '还没有声明兴趣领域。添加一个，系统会按水平准备内容并推送。';
+    els.interestList.appendChild(empty);
+    return;
+  }
+  for (const entry of declared) els.interestList.appendChild(interestRow(entry));
+}
+
+async function openInterestSettings() {
+  setInterestStatus('');
+  await refreshCurriculumMeta();
+  paintInterestSettings();
+}
+
+/** "添加" in 设置 → 兴趣领域: one `interest.declared` event, then the feed refresh. */
+async function onAddInterest() {
+  const domain = els.interestDomain?.value.trim() ?? '';
+  const level = normalizeLevel(els.interestLevel?.value);
+  if (!domain) {
+    setInterestStatus('请填写领域名称（例如：数学）', true);
+    els.interestDomain?.focus();
+    return;
+  }
+  els.btnInterestAdd.disabled = true;
+  setInterestStatus(`正在声明兴趣「${domain}」…`);
+  try {
+    const result = await rpc('declareInterest', { domain, level });
+    applyFeedResult(result?.feed);
+    els.interestDomain.value = '';
+    setInterestStatus(`已声明兴趣「${domain}」（${levelLabel(level)}）`);
+    toast(`已声明兴趣「${domain}」· 今日推荐已更新`);
+    await refreshCurriculumMeta();
+    paintInterestSettings();
+    await refresh();
+    // A freshly declared domain has no content: prepare it right away when a
+    // model is configured, otherwise show the configure-model hint.
+    void maybeAutoCurriculum({ trigger: 'declare' });
+  } catch (err) {
+    setInterestStatus(err.message, true);
+    toast(err.message);
+  } finally {
+    if (els.btnInterestAdd) els.btnInterestAdd.disabled = false;
+  }
+}
+
+async function onRemoveInterest(domain) {
+  try {
+    const result = await rpc('removeInterest', { domain });
+    applyFeedResult(result?.feed);
+    setInterestStatus(`已移除兴趣「${domain}」（捕获记录保留）`);
+    toast(`已移除兴趣「${domain}」`);
+    await refreshCurriculumMeta();
+    paintInterestSettings();
+    await refresh();
+  } catch (err) {
+    setInterestStatus(err.message, true);
+    toast(err.message);
+  }
+}
+
+/** First run / empty state: import the bundled beginner curriculum + declarations. */
+async function runSeedCurriculum() {
+  // The page resolves the extension URL: chrome.runtime is reliable on an
+  // extension page but not in every dedicated worker implementation, while
+  // fetch(chrome-extension://…) works fine inside the worker.
+  const runtime = globalThis.chrome?.runtime;
+  const url = runtime && typeof runtime.getURL === 'function' ? runtime.getURL('data/seed-curriculum.json') : '';
+  const result = await rpc('seedCurriculum', url ? { url } : {});
+  state.feed.items = [];
+  if (result && result.alreadySeeded) return result;
+  const domains = Array.isArray(result.domains) && result.domains.length > 0 ? result.domains : ['计算机', '人工智能'];
+  toast(`已为你准备${domains.map((domain) => `「${domain}」`).join('')}入门内容`, 6000);
+  return result;
+}
+
+async function seedFromEmptyState() {
+  if (els.btnSeed) els.btnSeed.disabled = true;
+  try {
+    await runSeedCurriculum();
+    await refresh();
+    await refreshCurriculumMeta();
+    if (state.curriculum.interests.length > 0) paintInterestSettings();
+    void maybeAutoCurriculum({ trigger: 'seed' });
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    if (els.btnSeed) els.btnSeed.disabled = false;
+  }
+}
+
+/**
+ * The one place that starts autonomous generation. Rules (see curriculum-guard):
+ * never twice at once, never loop inside a session, at most once per domain per
+ * local day; without a configured model it only shows a non-blocking hint.
+ */
+async function maybeAutoCurriculum({ trigger = 'boot' } = {}) {
+  if (state.curriculum.busy) return { action: 'none', reason: 'busy' };
+  await refreshCurriculumMeta();
+  const plan = planNextGeneration({
+    needs: state.curriculum.needs,
+    curriculumState: state.curriculum.dayState,
+    day: localDayKey(),
+    providerReady: providerReady(state.provider),
+    busy: state.curriculum.busy,
+    attempted: state.curriculum.attempted,
+  });
+  if (plan.action === 'none') {
+    if (plan.reason === 'no-needs' || plan.reason === 'daily-limit') paintFeedHint('');
+    return plan;
+  }
+  const need = plan.need;
+  if (plan.action === 'hint') {
+    paintFeedHint(`点 ⚙ 配置模型后，系统会为你主动准备「${need.domain}」的内容`);
+    return plan;
+  }
+
+  state.curriculum.busy = true;
+  state.curriculum.attempted.add(need.domain);
+  paintFeedHint(`正在为「${need.domain}」准备${levelLabel(need.level)}内容…`);
+  try {
+    const result = await rpc(
+      'generateCurriculum',
+      {
+        domain: need.domain,
+        level: need.level,
+        count: CURRICULUM_BATCH,
+        provider: state.provider,
+      },
+      RPC_TIMEOUTS.generateCurriculum,
+    );
+    const added = Number(result?.addedPropositions) || 0;
+    // Persist the once-per-domain-per-day guard only after a successful call.
+    const nextDayState = markGeneratedForDay(state.curriculum.dayState, need.domain, localDayKey());
+    if (await saveCurriculumState(storageArea(), nextDayState)) state.curriculum.dayState = nextDayState;
+    toast(`已加入 ${added} 条 · 今日推荐已更新`, 5200);
+    paintFeedHint(`已为「${need.domain}」准备 ${added} 条内容 · 今日推荐已更新`);
+    await refreshCurriculumMeta();
+    state.feed.items = [];
+    await refresh();
+    if (state.surface === 'feed') await refreshFeedAndPaint();
+    return { ...plan, added };
+  } catch (err) {
+    // A failure may be retried later by an explicit trigger; the daily guard is
+    // only written on success, so no content is silently skipped for the day.
+    state.curriculum.attempted.delete(need.domain);
+    paintFeedHint(`为「${need.domain}」准备内容失败：${err.message}`, { tone: 'error' });
+    toast(err.message);
+    return { action: 'error', need, error: err.message };
+  } finally {
+    state.curriculum.busy = false;
+  }
+}
+
 async function loadProviderConfig() {
   const area = storageArea();
   if (!area) return;
@@ -511,6 +777,9 @@ async function persistProvider(config) {
   paintProviderStatus();
   showProviderError('');
   toast('模型配置已保存');
+  // Declared domains may still need content: now that a model exists, prepare
+  // the smallest one in the background (once per domain per day).
+  void maybeAutoCurriculum({ trigger: 'provider' });
 }
 
 /**
@@ -624,8 +893,23 @@ async function boot() {
       const detail = init.persisted ? 'chrome.storage 持久化' : '仅内存（未检测到 chrome.storage）';
       toast(`存储回退：${detail}；原因可在「诊断」里查看`, 5600);
     }
+    // First run: the learner has neither content nor interests. Import the
+    // bundled beginner curriculum and declare 计算机 + 人工智能, so 今日推送 has
+    // something to push before any capture and before a model is configured.
+    const interestCount = Array.isArray(init.interests) ? init.interests.length : 0;
+    if (init.counts.propositions === 0 && interestCount === 0) {
+      try {
+        await runSeedCurriculum();
+      } catch (err) {
+        toast(`入门内容载入失败：${err.message}`, 5600);
+      }
+    }
     await refresh();
     await consumePendingCapture();
+    await refreshCurriculumMeta();
+    // Needs may exist from a previous session (a declared domain that never got
+    // content); prepare it now if a model is available, hint if it is not.
+    void maybeAutoCurriculum({ trigger: 'boot' });
   } catch (err) {
     fail(err && err.message ? err.message : String(err));
   }
@@ -835,6 +1119,12 @@ function paintFeedDone() {
       ? `今天的小剂量已经完成。你的兴趣：${interests.map((entry) => `${entry.name}（×${entry.count}）`).join('、')}`
       : '今天没有更多可推的内容。';
   els.btnFeedReview.focus();
+  // The feed is empty: declared domains may still lack content, so try once per
+  // page session to prepare one (the guard prevents loops and duplicate calls).
+  if (!state.curriculum.emptyChecked) {
+    state.curriculum.emptyChecked = true;
+    void maybeAutoCurriculum({ trigger: 'feed-empty' });
+  }
 }
 
 function logFeedShown(item) {
@@ -1141,6 +1431,25 @@ function formatDiagnostics(info, graph) {
       } · 跳过 ${feed.skipped ?? 0} · 兴趣 ${interests}`,
     );
   }
+  if (info.curriculum) {
+    // M2c: the declared side (who the system is preparing for) and the work queue.
+    const declaredInterests = Array.isArray(info.curriculum.interests)
+      ? info.curriculum.interests.filter((entry) => entry && entry.declared)
+      : [];
+    const interestLine =
+      declaredInterests.length > 0
+        ? declaredInterests.map((entry) => `${entry.name}(${levelLabel(entry.level)})`).join('、')
+        : '无';
+    lines.push(`兴趣: ${interestLine}`);
+    const needs = Array.isArray(info.curriculum.needs) ? info.curriculum.needs : [];
+    const needLine =
+      needs.length > 0
+        ? needs
+            .map((entry) => `${entry.domain}(${levelLabel(entry.level)}·已有 ${Number(entry.existing) || 0})`)
+            .join('、')
+        : '无';
+    lines.push(`待生成: ${needLine}`);
+  }
   if (graph) {
     lines.push(
       `图谱: 命题 ${graph.propositions} · 推理链 ${graph.chains} · 基础 ${graph.foundation} · 有前置 ${graph.withPrereq} · 已掌握 ${graph.mastered}`,
@@ -1219,7 +1528,10 @@ function openSettings() {
     radio.checked = Number(radio.value) === state.feedSettings.dose;
   }
   fillProviderForm();
+  setInterestStatus('');
   openDialog(els.dialogSettings);
+  // Interests are events in the worker: read them fresh every time the dialog opens.
+  void openInterestSettings();
 }
 
 function setMode(mode) {
@@ -1250,6 +1562,24 @@ async function clearAll() {
     closeDialogs();
     state.feed.items = [];
     state.feed.shown.clear();
+    // Guard bookkeeping is page-side cache; clear it with the data it protects.
+    state.curriculum = {
+      busy: false,
+      attempted: new Set(),
+      dayState: {},
+      needs: [],
+      interests: [],
+      emptyChecked: false,
+    };
+    const area = storageArea();
+    if (area && typeof area.remove === 'function') {
+      try {
+        await area.remove(CURRICULUM_STATE_KEY);
+      } catch {
+        /* best effort: losing the guard only allows one extra generation */
+      }
+    }
+    paintFeedHint('');
     await refresh();
     toast('已清空全部本地数据');
   } catch (err) {
@@ -1783,6 +2113,7 @@ function wire() {
   els.btnFeedCapture.addEventListener('click', openCaptureDialog);
 
   // Empty state
+  els.btnSeed.addEventListener('click', () => void seedFromEmptyState());
   els.btnSample.addEventListener('click', () => void loadSamplePack());
   els.captureAutoCommit.addEventListener('change', onCaptureAutoCommitChange);
   els.btnCaptureTop.addEventListener('click', openCaptureDialog);
@@ -1849,6 +2180,14 @@ function wire() {
   els.btnProviderSave.addEventListener('click', onProviderSave);
   els.btnProviderModels.addEventListener('click', () => void onProviderFetchModels());
   els.btnProviderTest.addEventListener('click', () => void onProviderTest());
+
+  // 兴趣领域: add form (Enter works too) + remove buttons are wired per row.
+  els.btnInterestAdd.addEventListener('click', () => void onAddInterest());
+  els.interestDomain.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    void onAddInterest();
+  });
 
   // Capture dialog
   els.btnCaptureCancel.addEventListener('click', closeDialogs);

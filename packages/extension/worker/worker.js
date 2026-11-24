@@ -75,6 +75,13 @@ const OPS = {
   // M2a push layer: today's ad-like feed + C-ledger attention events.
   feed: (service, args) => service.feed(args),
   exposure: (service, args) => service.exposure(args),
+  // M2c: declared interests + autonomously prepared curriculum. Generating one
+  // batch is a model call, so the page gives it a longer RPC timeout.
+  declareInterest: (service, args) => service.declareInterest(args),
+  removeInterest: (service, args) => service.removeInterest(args),
+  seedCurriculum: (service, args) => service.seedCurriculum(args || {}),
+  curriculumNeeds: (service) => service.curriculumNeeds(),
+  generateCurriculum: (service, args) => service.generateCurriculum(args),
   importPack: (service, args) => service.importPack(args.text),
   grade: (service, args) => service.grade(args),
   quiz: (service, args) => service.quiz(args),

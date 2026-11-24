@@ -38,7 +38,8 @@
             捕获一个你感兴趣的页面（或导入几条例题），新标签页就会开始「今日推送」。
           </p>
           <div class="row">
-            <button class="btn primary" id="btn-sample" type="button">载入示例包</button>
+            <button class="btn primary" id="btn-seed" type="button">载入入门内容</button>
+            <button class="btn" id="btn-sample" type="button">载入示例包</button>
             <button class="btn" id="btn-capture-empty" type="button">捕获文本</button>
             <button class="btn" id="btn-import-pack-file" type="button">导入 JSON 文件</button>
             <button class="btn" id="btn-paste-pack" type="button">粘贴 JSON</button>
@@ -64,6 +65,7 @@
             <p class="hint muted feed-progress" id="feed-progress"></p>
           </div>
           <p class="muted feed-loading" id="feed-loading" hidden>正在整理今日推送…</p>
+          <p class="hint muted feed-hint" id="feed-hint" role="status" aria-live="polite" hidden></p>
           <div class="center feed-done" id="feed-done" hidden>
             <h1>今天的知识看完了 ✓</h1>
             <p class="muted" id="feed-done-detail"></p>
@@ -194,6 +196,30 @@
           <p class="hint muted">
             关闭后每次捕获都会先展示命题与推理链，确认后才写入。开启时只给一条结果提示。
           </p>
+        </fieldset>
+        <fieldset class="fieldset">
+          <legend>兴趣领域</legend>
+          <p class="hint muted">
+            声明感兴趣的领域，系统会按你的水平准备内容并推送；捕获页面也会自动加入兴趣。
+          </p>
+          <div class="interest-list" id="interest-list" aria-live="polite"></div>
+          <div class="row interest-form">
+            <input
+              type="text"
+              id="interest-domain"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="例如：数学"
+              aria-label="兴趣领域"
+            />
+            <select id="interest-level" aria-label="起始水平">
+              <option value="beginner" selected>入门</option>
+              <option value="intermediate">进阶</option>
+              <option value="advanced">高级</option>
+            </select>
+            <button class="btn primary" id="btn-interest-add" type="button">添加</button>
+          </div>
+          <p class="hint muted" id="interest-status" hidden></p>
         </fieldset>
         <fieldset class="fieldset">
           <legend>推送</legend>

@@ -179,6 +179,12 @@ check('background capture orchestration', () => {
   return '7 cases';
 });
 
+check('curriculum generation smoke test', () => {
+  const out = run(process.execPath, ['packages/extension/test/curriculum-smoke.mjs']);
+  if (!out.includes('CURRICULUM SMOKE OK')) throw new Error('curriculum smoke did not report OK');
+  return 'ok';
+});
+
 check('feed policy smoke test', () => {
   const out = run(process.execPath, ['packages/extension/test/feed-smoke.mjs']);
   if (!out.includes('FEED SMOKE OK')) throw new Error('feed smoke did not report OK');

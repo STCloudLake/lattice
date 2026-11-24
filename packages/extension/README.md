@@ -1,9 +1,11 @@
-# Lattice 扩展（M0 骨架 + M1 捕获 + M2a 推送）
+# Lattice 扩展（M0 骨架 + M1 捕获 + M2a 推送 + M2c 兴趣/自主内容）
 
 Chrome/Edge 的 MV3 扩展：把新标签页变成 Lattice 的**今日推送**表面。
 M0 的离线数据脊柱（事件日志 → 投影 → 复习）保持不变；M1a/M1b 增加了**用户主动触发**的
 捕获链路：粘贴文本/抓取页面 → 你配置的 OpenAI 兼容模型抽取命题/推理链/领域 → 预览确认 → 入库。
 M2a 把捕获的语义改成**兴趣信号**：知识像广告一样按小剂量推送，验证（复习/测验）是可选项。
+M2c 让用户**自己声明兴趣领域**，并由系统**主动准备内容**：首次运行就内置「计算机」「人工智能」
+入门内容；配好模型后，声明但还缺内容的领域会被自动生成，不必依赖捕获页面。
 没有后台爬取、没有遥测；数据只在本机浏览器里，可导出成纯文本 JSONL。
 
 ## 构建
@@ -19,6 +21,8 @@ npm run build
 - `vendor/lattice-core/` —— 打包好的 `@lattice/core` + `@lattice/extract`（ESM）
 - `vendor/sqlite-wasm/` —— sqlite-wasm 官方 dist（含 `sqlite3.wasm`）
 
+同时会把 `examples/seed-curriculum.json` 复制到 `data/seed-curriculum.json`（内置入门课程）。
+
 ## 加载（开发者模式）
 
 1. 先跑 `npm run build`。
@@ -26,8 +30,10 @@ npm run build
 3. 打开右上角「开发者模式」。
 4. 点「加载已解压的扩展程序」，选择 `packages/extension/` 目录。
 5. **新开一个标签页**（`chrome_url_overrides.newtab` 会接管新标签页）。
-6. 首次是空状态：点「载入示例包」，新标签页开始「今日推送」；在卡片上点 **知道了** / **不感兴趣**，
-   或点 **考考我** 进入可选的测验。复习队列在顶栏「复习 N」标签里。
+6. 首次运行自动载入内置入门内容（计算机 + 人工智能），toast
+   `已为你准备「计算机」「人工智能」入门内容`，新标签页直接开始「今日推送」——**无需配置模型**。
+   在卡片上点 **知道了** / **不感兴趣**，或点 **考考我** 进入可选的测验。
+   想换/加领域：⚙ 设置 →「兴趣领域」添加；配好模型后系统会自动为缺内容的声明领域生成一小批内容。
 
 > 不需要在扩展页里打开任何文件；`chrome://newtab` 就是入口。
 
@@ -37,17 +43,20 @@ npm run build
 manifest.json            MV3 清单（含模型接口的 host_permissions / optional_host_permissions）
 background.js            最小 service worker（M0 无后台任务）
 newtab/                  新标签页 UI（HTML/CSS/原生 JS，无框架、无内联脚本）
+  curriculum-guard.js    M2c 页面侧「每领域每天最多生成一次」守卫（可在 Node 里测试）
 worker/                  RPC worker —— 唯一写事件日志的地方
   worker.js              RPC 分发 + 打开数据库 + 回退持久化
-  service.js             事件日志/投影/导入导出/抽取确认入库（DB 可注入，可被 Node 测试）
+  service.js             事件日志/投影/导入导出/抽取确认入库/声明兴趣/课程生成
   llm.js                 OpenAI 兼容模型客户端（BYOK，60s 超时，中文错误）
   db.js                  sqlite-wasm 封装：OPFS → OPFS SAH pool → 内存
   persist.js             回退模式：整份事件日志 JSONL（+ coverage 镜像）存 chrome.storage.local
   util.js
 data/sample-pack.json    示例命题包（来自 examples/sample-pack.json）
+data/seed-curriculum.json 内置入门课程（14 命题 / 3 链，来自 examples/seed-curriculum.json）
 test/worker-smoke.mjs    M0 数据层冒烟测试（内存 SQLite + 假 chrome.storage）
 test/capture-smoke.mjs   M1a 捕获链路冒烟测试（假 provider fetch + coverage/幂等）
 test/feed-smoke.mjs      M2a 推送层冒烟测试（feed 剂量/同日照去重/跳过疲劳/兴趣）
+test/curriculum-smoke.mjs M2c 声明兴趣 + seed 幂等 + 课程生成 + 每日一次守卫
 test/extension-e2e.mjs   真实 MV3 E2E（含本地 stub provider，无需真实 Key）
 vendor/                  构建产物（不提交）
 ```
@@ -65,8 +74,9 @@ Web Worker 中运行，所以 UI 只通过一个很小的 RPC（`{op, args}` →
    **不需要 SharedArrayBuffer**；同一个 OPFS 池同时只能被一个标签页持有。
 3. 内存 SQLite + 整份事件日志以 JSONL 镜像到 `chrome.storage.local`（防抖 ~300ms）。
 
-诊断面板（页脚「诊断」）会显示 `存储: OPFS` 或 `存储: 回退(chrome.storage)`、实际 VFS、回退原因，
-以及 M2a 的 `推送: 每日 N 条 · 今日已展示 X · 参与 Y · 跳过 Z · 兴趣 …` 行。
+诊断面板（页脚「诊断」）会显示 `存储: OPFS` 或 `存储: 回退(chrome.storage)`、实际 VFS、回退原因、
+M2a 的 `推送: 每日 N 条 · 今日已展示 X · 参与 Y · 跳过 Z · 兴趣 …` 行，以及 M2c 的两行：
+`兴趣:`（已声明的领域与水平）和 `待生成:`（声明了但内容还不够的领域）。
 
 ### manifest 里有三个「非可选」的键
 
@@ -122,6 +132,32 @@ MV3 默认不允许 WebAssembly 编译，默认也不给扩展页面跨源隔离
   抽取管线把 `domain` 同时写进 `proposition.domain` 和 `interest.observed`（兴趣只影响排序）。
 - RPC：`feed({dose, now?})` → 卡片数据 + 兴趣；`exposure({propositionId, kind, surface})` →
   追加一条 C 账事件并返回重算后的 feed；`diagnostics()` 增加 `feed` 字段。
+
+## 兴趣领域与自主内容（M2c）
+
+**用户可以自己说「我想学这个」，不必等捕获页面来推断。** 声明本身也是一条 C 账事件
+（`interest.declared`），没有第二份「本地设置」真相：重启后由事件日志重放出来。
+
+- 首次运行（0 命题 + 0 兴趣）自动调用 `seedCurriculum()`：一个事务导入内置
+  `data/seed-curriculum.json`（计算机 7 + 人工智能 7，含推理链）并为两个领域写
+  `interest.declared`（入门）。toast：`已为你准备「计算机」「人工智能」入门内容`。
+  重复执行是幂等的（`meta` 标记 + 「已有内容就不注入」双保险；清空数据后可用空状态里的
+  「载入入门内容」重新载入）。
+- ⚙ 设置 →「兴趣领域」：每行 `领域名 · 水平 · [移除]`；输入框 + 水平下拉（入门/进阶/高级）+
+  「添加」。列表来自 worker 的 `curriculumNeeds()`，页面**不**在本地持久化兴趣。
+  捕获页面仍会自动贡献 `interest.observed`（诊断里的 `兴趣` 行会显示），只是没被声明就不会
+  主动生成内容。
+- 自主准备内容：当 `curriculumNeeds()` 非空（声明了但 < 6 条命题）或今日推送为空时——
+  - 有可用模型：挑「已有命题最少」的领域，每次生成 6 条左右（`generateCurriculum`，actor
+    `llm:<model>@curriculum-v1`），成功后 toast `已加入 N 条 · 今日推荐已更新` 并重算推送；
+  - 没有模型：在推送下方显示非阻塞提示
+    `点 ⚙ 配置模型后，系统会为你主动准备「<领域>」的内容`（保存模型后会立刻重试）。
+  - 规则：同一领域**每天最多生成一次**（`chrome.storage.local.latticeCurriculumState =
+    { '<领域>': 'YYYY-MM-DD' }`，成功后才写）；同一时刻只允许一个生成在飞；同一页面会话
+    不重复尝试同一领域——这三条都在 `newtab/curriculum-guard.js`，可在 Node 里单独测。
+- 捕获/声明/曝光只进 C 账，绝不改掌握度或 FSRS：生成的内容是普通命题，会像其他内容一样
+  经过合并、卡片生成与推送策略。
+- 「清空数据」会连同兴趣与 `latticeCurriculumState` 一起清掉（meta 里的 seed 标记也被删除）。
 
 ## 捕获入口（M1b）
 
@@ -184,6 +220,9 @@ node packages/extension/test/capture-smoke.mjs
 # 2b) M2a 推送层冒烟测试：feed 剂量/同日照去重/跳过疲劳/兴趣排序
 node packages/extension/test/feed-smoke.mjs
 
+# 2c) M2c 声明兴趣 + 内置课程 seed 幂等 + 课程生成 + 每日一次守卫
+node packages/extension/test/curriculum-smoke.mjs
+
 # 3) 真实 MV3 环境 E2E：自动启动 headless Edge/Chrome 并 --load-extension
 #    内置本地 stub provider，不需要真实 API Key
 node packages/extension/test/extension-e2e.mjs
@@ -201,18 +240,25 @@ coverage 二次命中不调模型、重复提交幂等、回退模式重启后 c
 限额出现、带 `domain` 的捕获写入 `interest.observed` + `proposition.domain` 并影响排序、
 诊断里的推送事实、以及曝光事件跨重启保留。
 
-`extension-e2e.mjs`：从 background service worker 找到扩展 id，打开新标签页，
-载入示例包 → 断言「今日推送」卡片（领域徽标 / 基础标签 / 掌握·R / 来自「…」）→
-点「知道了」推进 → 切到「复习」标签用真实键盘事件（空格 + 数字键）答题 → 读诊断面板 →
-刷新验证持久化与**同日照去重**；然后启动一个**不发送 CORS 头的本地 OpenAI 兼容 stub provider**
-（真实 DeepSeek/OpenAI 也不发 CORS，靠清单里的 host_permissions 才能调用），通过设置 UI
-配置模型、测试连接、捕获文本、断言预览带领域、确认入库后 toast 与计数变化、推送立即重算、
-点「知道了 / 不感兴趣 / 考考我」验证 C 账与可选测验、再次捕获命中 coverage、诊断显示
-`模型:`/`图谱:`/`推送:` 行；再验证「每日剂量」持久化与「今天的知识看完了 ✓」空状态，
-开第二个标签页确认多标签可用，并断言无 console 错误 / CSP 违规。
+`curriculum-smoke.mjs`：内置课程一次事务导入 14 命题/3 链 + 声明两个入门领域、重复 seed
+幂等（含模拟重启、已有用户内容时不注入）、`declareInterest/removeInterest` 往返、
+`curriculumNeeds` 的水平/计数、stub 模型生成 6 命题/1 链且 actor 为
+`llm:stub-model@curriculum-v1`、重复生成不产生重复命题、每日一次守卫（hint / generate /
+daily-limit / busy / attempted / 次日恢复 / 坏 storage 值），以及诊断字段。
+
+`extension-e2e.mjs`：从 background service worker 找到扩展 id，打开新标签页，断言**首次运行
+自动 seed** 的 toast、`共 14 命题` 与「今日推送」里的内置领域内容（此时**没有配置模型**）→
+在设置里声明「数学」→ 推送下方出现「点 ⚙ 配置模型后…」提示、诊断出现 `兴趣:` / `待生成:` →
+通过设置 UI 配置**不发送 CORS 头的本地 stub provider**（真实 DeepSeek/OpenAI 也不发 CORS，
+靠清单里的 host_permissions 才能调用）并验证保存后自动为「数学」生成 6 条内容、stub 收到
+`课程设计者` 提示、`latticeCurriculumState` 落下今日守卫、生成内容进入今日推送 →
+测试连接、复习队列键盘评级、关闭自动入库后捕获文本（预览带领域、确认入库、推送重算）、
+再次捕获命中 coverage、`知道了 / 不感兴趣 / 考考我`、诊断的 `推送:` / `兴趣:` / `待生成:` /
+`模型:` / `图谱:` 行、每日剂量持久化、刷新后 seed 不重复执行且当天已展示内容不重复推送、
+「今天的知识看完了 ✓」空状态、第二个标签页、以及无 console 错误 / CSP 违规。
 （找不到浏览器时可用 `CHROME_PATH` 指定，或跳过此测试。）
 
-## 已知边界（M1/M2a）
+## 已知边界（M1/M2a/M2c）
 
 - 捕获目前只有「粘贴文本 / 工具栏抓整页 / 右键抓选区」：PDF、字幕捕获还没做。
 - 捕获在调用模型期间不能从 UI 取消：最长等 worker 的 60s 模型超时。
@@ -227,6 +273,13 @@ coverage 二次命中不调模型、重复提交幂等、回退模式重启后 c
 - 领域由 LLM 抽取，跨材料可能不一致（示例包是 `economics`，捕获可能是 `经济学`）；
   尚未做领域实体归并，所以兴趣 boost 可能漏配（只会影响排序，不影响掌握）。
 - 「考考我」仍是自评对错（命题包格式里没有选项/解析字段）。
+- M2c 的「每天一次」守卫只在页面侧（`latticeCurriculumState`）：清浏览器存储或换配置文件会
+  让它忘记今天的生成记录（最坏是多生成一批），它不是学习证据，也不写事件日志。
+- M2c 生成时用 `buildMergePlan(candidate, {decisions: new Map()})`（全部视为新命题），
+  只做**完全相同 statement** 的防御性去重；语义重复（换一种说法）仍可能进图。
+- 自主生成只服务于**已声明**的领域；只由捕获推断出的兴趣（`interest.observed`）不会触发
+  内容生成。
+- 没有「生成中取消」：一次课程生成最多等 worker 的 60s 模型超时，期间不会发起第二次。
 
 ## M0 刻意不做
 

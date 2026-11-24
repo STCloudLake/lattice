@@ -21,7 +21,10 @@ import {
   chainKey,
   createEventFactory,
   createIdFactory,
+  curriculumLevelFor as coreCurriculumLevelFor,
+  curriculumNeeds as coreCurriculumNeeds,
   dayOf,
+  declareInterest as interestDeclaredEvent,
   dueItems,
   emptyMastery,
   exposureEngaged,
@@ -32,6 +35,7 @@ import {
   extractCandidate,
   formatReport,
   foundationPropositions,
+  generateCurriculum as generateCurriculumCandidate,
   interestsOf,
   masterySummary,
   newItems,
@@ -42,6 +46,7 @@ import {
   planToEvents,
   prerequisiteEdges,
   rateReview,
+  removeInterest as interestRemovedEvent,
   replay,
   resolveIdentity,
   retrievability,
@@ -63,6 +68,32 @@ const NEW_PER_QUEUE = 20;
 /** Ad-like default dose when the page does not send its `latticeFeedSettings.dose`. */
 const DEFAULT_FEED_DOSE = 3;
 const MAX_FEED_DOSE = 50;
+
+// ---------------------------------------------------------------------------
+// M2c: declared interests + autonomously prepared curriculum.
+//
+// The user may declare "I want this domain at this level"; the extension then
+// prepares content for it instead of waiting for a captured page. These limits
+// keep one generation small and cheap (a daily dose, not a textbook).
+// ---------------------------------------------------------------------------
+
+/** A declared domain is "covered enough" at this many active propositions. */
+const CURRICULUM_MIN_PROPOSITIONS = 6;
+/** Default batch size for one generation call. */
+const CURRICULUM_DEFAULT_COUNT = 6;
+const CURRICULUM_MAX_COUNT = 20;
+/** How many existing statements the prompt may see (keeps the request small). */
+const CURRICULUM_EXISTING_LIMIT = 20;
+/** Preferences written by seedCurriculum() as explicit declared interests. */
+const SEED_INTERESTS = [
+  { domain: '计算机', level: 'beginner' },
+  { domain: '人工智能', level: 'beginner' },
+];
+/** meta key proving the bundled pack was imported (idempotency, cleared by clear()). */
+const SEED_CURRICULUM_META = 'seedCurriculumSeeded';
+const SEED_CURRICULUM_URL = 'data/seed-curriculum.json';
+const CURRICULUM_PROMPT_VERSION = 'curriculum-v1';
+const LEVELS = new Set(['beginner', 'intermediate', 'advanced']);
 
 /** C-ledger attention events. They never touch mastery or the schedule. */
 const EXPOSURE_KINDS = new Set(['shown', 'engaged', 'skipped']);
@@ -353,6 +384,9 @@ export class LatticeService {
       dueCount: render.counts.due,
       newCount: render.counts.new,
       empty: render.empty,
+      // Declared/inferred interests in the C ledger: the page uses this for the
+      // first-run seed decision and the 兴趣领域 settings list.
+      interests: render.interests,
       lastSeq: this.#seq,
       seedErrors: this.#seedErrors,
       openErrors: this.#openErrors,
@@ -386,6 +420,9 @@ export class LatticeService {
         new: fresh.length,
         events: this.#eventCount(),
       },
+      // C ledger: interests are what the push layer is allowed to react to.
+      // They never touch the mastery or FSRS ledgers.
+      interests: this.#interestViews(state),
       calibration: {
         n: report.n,
         brier: report.brier,
@@ -416,6 +453,18 @@ export class LatticeService {
       dose,
       interests: this.#interestViews(state),
       todayDate: dayOf(now),
+    };
+  }
+
+  /**
+   * Declared domains that still need content, plus every interest in the C
+   * ledger. Pure read: the page decides *when* to generate, this reports *what*.
+   */
+  curriculumNeeds() {
+    const state = this.#ensureState();
+    return {
+      needs: coreCurriculumNeeds(state, { minPropositions: CURRICULUM_MIN_PROPOSITIONS }),
+      interests: this.#interestViews(state),
     };
   }
 
@@ -493,6 +542,11 @@ export class LatticeService {
         skipped,
         interests: this.#interestViews(state),
       },
+      // M2c: declared interests with levels + the domains still missing content.
+      curriculum: {
+        needs: coreCurriculumNeeds(state, { minPropositions: CURRICULUM_MIN_PROPOSITIONS }),
+        interests: this.#interestViews(state),
+      },
       openErrors: this.#openErrors,
       seedErrors: this.#seedErrors,
     };
@@ -530,6 +584,214 @@ export class LatticeService {
     this.#append(built.events);
     const addedCues = built.events.filter((event) => event.type === 'cue.asserted').length;
     return { addedPropositions: fresh.length, addedCues, skipped, errors: [] };
+  }
+
+  // -------------------------------------------------------------------------
+  // Declared interests (M2c)
+  //
+  // Interests are events like everything else: no local "settings" object is
+  // the source of truth, the C ledger is. Both RPCs replay after the write and
+  // return the recomputed feed, so the page never has to ask twice.
+  // -------------------------------------------------------------------------
+
+  /** "我对这个领域感兴趣（从入门/进阶/高级开始）" -> `interest.declared`. */
+  declareInterest(input = {}) {
+    const domain = cleanText(input?.domain).slice(0, 40);
+    if (!domain) throw new Error('请填写领域名称');
+    const level = LEVELS.has(input?.level) ? input.level : 'beginner';
+    const now = this.#nowIso(input?.now);
+    const factory = this.#newFactory();
+    const { event } = interestDeclaredEvent(factory, { domain, level }, { at: now, actor: 'user' });
+    this.#seq = factory.seq;
+    this.#append([event]);
+    return { ok: true, feed: this.feed({ now }) };
+  }
+
+  /** Withdraws the explicit declaration; captured interest evidence stays. */
+  removeInterest(input = {}) {
+    const domain = cleanText(input?.domain).slice(0, 40);
+    if (!domain) throw new Error('缺少领域名称');
+    const now = this.#nowIso(input?.now);
+    const factory = this.#newFactory();
+    const { event } = interestRemovedEvent(factory, { domain }, { at: now, actor: 'user' });
+    this.#seq = factory.seq;
+    this.#append([event]);
+    return { ok: true, feed: this.feed({ now }) };
+  }
+
+  /** The URL of the bundled curriculum inside the extension bundle. */
+  #seedCurriculumUrl() {
+    const runtime = globalThis.chrome?.runtime;
+    if (!runtime || typeof runtime.getURL !== 'function') return '';
+    try {
+      return runtime.getURL(SEED_CURRICULUM_URL);
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * First-run content: imports the bundled beginner curriculum (计算机 +
+   * 人工智能) and declares both domains at `beginner`, so 今日推送 has something
+   * to show before any capture and before a model is configured.
+   *
+   * Idempotent twice over: a `meta` flag records a completed seed, and an event
+   * log that already has propositions is left untouched. Everything lands in ONE
+   * transaction (pack events + declarations + flag).
+   */
+  async seedCurriculum(input = {}) {
+    if (this.#getMeta(SEED_CURRICULUM_META) === '1') return { alreadySeeded: true };
+    const state = this.#ensureState();
+    if (activePropositions(state).length > 0) return { alreadySeeded: true };
+
+    const url = cleanText(input?.url) || this.#seedCurriculumUrl();
+    if (!url) throw new Error('无法定位内置课程包（扩展资源不可用）');
+    const fetchImpl = this.#fetchImpl;
+    if (typeof fetchImpl !== 'function') throw new Error('当前环境不支持读取内置课程包');
+
+    let response;
+    try {
+      response = await fetchImpl(url);
+    } catch (err) {
+      throw new Error(`读取内置课程包失败：${err && err.message ? err.message : String(err)}`);
+    }
+    if (!response || !response.ok) {
+      throw new Error(`读取内置课程包失败（HTTP ${response ? response.status : '?'}）`);
+    }
+    let text;
+    try {
+      text = await response.text();
+    } catch {
+      throw new Error('读取内置课程包失败（内容为空或网络中断）');
+    }
+    const { pack, errors } = parsePropositionPack(String(text ?? ''));
+    if (!pack) throw new Error(`内置课程包格式无效：${errors[0] ?? '未知错误'}`);
+
+    const now = this.#clock.now().toISOString();
+    const factory = this.#newFactory();
+    const built = packToEvents(pack, factory, this.#newId, { at: now });
+    const events = [...built.events];
+    for (const interest of SEED_INTERESTS) {
+      const { event } = interestDeclaredEvent(factory, interest, { at: now, actor: 'system' });
+      events.push(event);
+    }
+    this.#seq = factory.seq;
+
+    const domains = [];
+    for (const proposition of pack.propositions) {
+      const domain = cleanText(proposition.domain ?? '');
+      if (domain && !domains.includes(domain)) domains.push(domain);
+    }
+    const counts = {
+      addedPropositions: events.filter((event) => event.type === 'proposition.asserted').length,
+      addedChains: events.filter((event) => event.type === 'chain.asserted').length,
+      addedCues: events.filter((event) => event.type === 'cue.asserted').length,
+    };
+    if (events.length === 0) {
+      return { alreadySeeded: false, ...counts, domains, errors };
+    }
+
+    // ONE transaction: pack events + declarations + the idempotency flag.
+    this.#append(events, () => this.#setMeta(SEED_CURRICULUM_META, '1'));
+    return { alreadySeeded: false, ...counts, domains, ...(errors.length > 0 ? { errors: errors.slice(0, 3) } : {}) };
+  }
+
+  // -------------------------------------------------------------------------
+  // Autonomous curriculum generation (M2c)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Asks the configured model for the next small batch of a declared domain and
+   * commits it as events (same validation + merge + plan path as a capture).
+   *
+   * The model content is all-new by construction: identity resolution against the
+   * existing graph is not asked here because generation already receives the
+   * existing statements in its prompt. A defensive statement-level filter still
+   * drops exact duplicates, so a model that re-emits the same sentence cannot
+   * duplicate the graph.
+   */
+  async generateCurriculum(input = {}) {
+    const domain = cleanText(input?.domain).slice(0, 40);
+    if (!domain) throw new Error('缺少领域名称');
+    const state = this.#ensureState();
+    const level = LEVELS.has(input?.level) ? input.level : coreCurriculumLevelFor(state, domain);
+    const requested = Math.round(Number(input?.count));
+    const count = Number.isFinite(requested) && requested > 0 ? Math.min(CURRICULUM_MAX_COUNT, requested) : CURRICULUM_DEFAULT_COUNT;
+    const provider = normalizeProvider(input?.provider);
+    const llm = createLlmPort(provider, { fetchImpl: this.#fetchImpl });
+    const existingStatements = this.#existingStatements(state, domain);
+
+    const result = await generateCurriculumCandidate(
+      { domain, level, count, ...(existingStatements.length > 0 ? { existingStatements } : {}) },
+      { llm },
+    );
+
+    const plan = buildMergePlan(result.candidate, { decisions: new Map() });
+    this.#dropDuplicateStatements(plan, state);
+
+    const now = this.#nowIso(input?.now);
+    let source;
+    try {
+      source = normalizeSource({
+        text: `curriculum:${domain}:${level}`,
+        title: `为「${domain}」准备的${level}内容`,
+        sourceKind: 'session',
+        capturedAt: now,
+      });
+    } catch {
+      throw new Error('无法为生成内容建立来源');
+    }
+    const actor = `llm:${provider.model}@${result.promptVersion || CURRICULUM_PROMPT_VERSION}`;
+    const factory = this.#newFactory();
+    const built = planToEvents(plan, { factory, newId: this.#newId, source, actor });
+    this.#seq = factory.seq;
+    if (built.events.length > 0) this.#append(built.events);
+
+    return {
+      ok: true,
+      addedPropositions: built.events.filter((event) => event.type === 'proposition.asserted').length,
+      addedChains: built.events.filter((event) => event.type === 'chain.asserted').length,
+      domain,
+      level,
+    };
+  }
+
+  /** Up to 20 statements, same-domain ones first (they matter most for dedupe). */
+  #existingStatements(state, domain) {
+    const target = domain.trim().toLowerCase();
+    const same = [];
+    const others = [];
+    for (const proposition of activePropositions(state)) {
+      const statement = cleanText(proposition.statement);
+      if (!statement) continue;
+      if ((proposition.domain ?? '').trim().toLowerCase() === target) same.push(statement);
+      else others.push(statement);
+    }
+    return [...same, ...others].slice(0, CURRICULUM_EXISTING_LIMIT);
+  }
+
+  /**
+   * Drops plan entries whose statement already exists (normalized) and the cues /
+   * chains that depend on them. Keeps the graph clean even if the model echoes.
+   */
+  #dropDuplicateStatements(plan, state) {
+    const known = new Set(activePropositions(state).map((proposition) => normalizeStatement(proposition.statement)));
+    const droppedRefs = new Set();
+    plan.create = plan.create.filter((entry) => {
+      const normalized = normalizeStatement(entry.statement);
+      if (known.has(normalized)) {
+        droppedRefs.add(entry.ref);
+        return false;
+      }
+      known.add(normalized);
+      return true;
+    });
+    if (droppedRefs.size === 0) return;
+    plan.cues = plan.cues.filter((cue) => !droppedRefs.has(cue.ref));
+    const liveRefs = new Set([...plan.create.map((entry) => entry.ref), ...plan.reuse.map((entry) => entry.ref)]);
+    plan.chains = plan.chains.filter((chain) =>
+      [...chain.premiseRefs, chain.conclusionRef].every((ref) => liveRefs.has(ref)),
+    );
   }
 
   /** One four-button self-rating: writes `review.rated` (S ledger + M evidence). */
@@ -1031,6 +1293,9 @@ export class LatticeService {
       name: interest.name,
       weight: interest.weight,
       count: interest.captureCount,
+      captureCount: interest.captureCount,
+      declared: interest.declared,
+      level: interest.level,
     }));
   }
 
