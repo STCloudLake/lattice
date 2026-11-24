@@ -5,6 +5,7 @@ export * from './fsrs.js';
 export * from './mastery.js';
 export * from './replay.js';
 export * from './queue.js';
+export * from './feed.js';
 export * from './calibration.js';
 export * from './io.js';
 export * from './digest.js';

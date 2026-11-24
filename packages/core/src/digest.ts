@@ -45,6 +45,18 @@ export function stateDigest(state: LearnerState): string {
       reviewCount: s.reviewCount,
       lapses: s.lapses,
     })),
+    interests: sortedBy(Object.values(state.interests), (i) => i.id).map((i) => ({
+      id: i.id,
+      weight: round(i.weight),
+      captureCount: i.captureCount,
+    })),
+    exposures: sortedBy(Object.values(state.exposures), (e) => e.propositionId).map((e) => ({
+      propositionId: e.propositionId,
+      shown: e.shown,
+      engaged: e.engaged,
+      skipped: e.skipped,
+      lastShownDay: e.lastShownDay ?? null,
+    })),
     reviews: [...state.reviews]
       .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       .map((r) => ({
@@ -70,6 +82,8 @@ export function stateSummary(state: LearnerState): Record<string, number> {
     propositions: Object.keys(state.propositions).length,
     cues: Object.keys(state.cues).length,
     chains: Object.keys(state.chains).length,
+    interests: Object.keys(state.interests).length,
+    exposures: Object.keys(state.exposures).length,
     reviews: state.reviews.length,
     eventsDigestInputs: Object.keys(state.mastery).length,
   };

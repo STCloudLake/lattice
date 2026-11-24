@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import {
   assertChain,
   assertCue,
+  assertInterest,
   assertProposition,
   createEventFactory,
   createIdFactory,
@@ -392,5 +393,43 @@ describe('reasoning chains in the CLI', () => {
     expect(report.ok).toBe(false);
     expect(report.problems.orphanChains).toHaveLength(1);
     expect(report.problems.orphanChains[0]?.missing).toContain('missing-id');
+  });
+});
+
+
+describe('feed command', () => {
+  it('prints a dose-limited feed with interests and reasons', async () => {
+    const dir = tempDir();
+    let n = 0;
+    const newId = () => 'f' + String(++n).padStart(3, '0');
+    const factory = createEventFactory({
+      deviceId: 'feed-cli',
+      newId,
+      now: () => new Date('2026-11-24T00:00:00.000Z'),
+    });
+    const events: LatticeEvent[] = [];
+    for (let i = 0; i < 5; i++) {
+      const p = assertProposition(factory, newId, { statement: `经济学命题 ${i}`, domain: '经济学' });
+      const c = assertCue(factory, newId, { propositionId: p.propositionId, front: '问？', back: '答。' });
+      events.push(p.event, c.event);
+    }
+    const interest = assertInterest(factory, { domain: '经济学', weight: 3 });
+    events.push(interest.event);
+
+    const feedPath = join(dir, 'feed.jsonl');
+    writeFileSync(feedPath, exportJsonl(events), 'utf8');
+
+    const cap = capture();
+    expect(await runCli(['feed', '--in', feedPath, '--dose', '2', '--json'], cap.io)).toBe(0);
+    const report = JSON.parse(stdout(cap)) as {
+      dose: number;
+      items: { reason: string; domain: string | null; statement: string }[];
+      domains: { name: string; weight: number; captures: number }[];
+    };
+    expect(report.dose).toBe(2);
+    expect(report.items).toHaveLength(2);
+    expect(report.items[0]?.reason).toBe('foundation');
+    expect(report.items[0]?.domain).toBe('经济学');
+    expect(report.domains[0]).toEqual({ name: '经济学', weight: 3, captures: 1 });
   });
 });

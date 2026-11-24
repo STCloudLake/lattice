@@ -3,6 +3,8 @@ import { applyEvidence, emptyMastery, resetMastery } from './mastery.js';
 import type {
   Chain,
   Cue,
+  ExposureState,
+  Interest,
   CueKind,
   Grade,
   Id,
@@ -14,7 +16,16 @@ import type {
 } from './types.js';
 
 export function emptyState(): LearnerState {
-  return { propositions: {}, cues: {}, chains: {}, mastery: {}, schedule: {}, reviews: [] };
+  return {
+    propositions: {},
+    cues: {},
+    chains: {},
+    interests: {},
+    exposures: {},
+    mastery: {},
+    schedule: {},
+    reviews: [],
+  };
 }
 
 /**
@@ -136,6 +147,36 @@ function applyEvent(state: LearnerState, e: LatticeEvent): void {
       return;
     }
 
+    case 'interest.observed': {
+      const name = asString(e.payload['domain']);
+      const id = e.subjectId ?? (name ? 'dom_' + name.toLowerCase() : undefined);
+      if (!name || !id) return;
+      const weightRaw = e.payload['weight'];
+      const weight = typeof weightRaw === 'number' && weightRaw > 0 ? weightRaw : 1;
+      const topicsRaw = e.payload['topics'];
+      const topics = Array.isArray(topicsRaw) ? topicsRaw.filter((t): t is string => typeof t === 'string') : [];
+      const existing = state.interests[id];
+      const next: Interest = existing
+        ? {
+            ...existing,
+            weight: existing.weight + weight,
+            captureCount: existing.captureCount + 1,
+            lastSeenAt: e.occurredAt,
+            topics: { ...existing.topics },
+          }
+        : {
+            id,
+            name,
+            weight,
+            captureCount: 1,
+            lastSeenAt: e.occurredAt,
+            topics: {},
+          };
+      for (const topic of topics) next.topics[topic] = (next.topics[topic] ?? 0) + 1;
+      state.interests[id] = next;
+      return;
+    }
+
     case 'cue.asserted': {
       const id = e.subjectId ?? asString(e.payload['id']);
       const propositionId = asString(e.payload['propositionId']);
@@ -240,17 +281,44 @@ function applyEvent(state: LearnerState, e: LatticeEvent): void {
       state.propositions = {};
       state.cues = {};
       state.chains = {};
+      state.interests = {};
+      state.exposures = {};
       state.mastery = {};
       state.schedule = {};
       state.reviews = [];
       return;
     }
 
-    // Attention evidence is the C ledger; M0 does not model it yet.
-    case 'exposure.shown':
-    case 'exposure.engaged':
-    case 'exposure.skipped':
+    // Attention evidence feeds the C ledger only. It never touches mastery.
+    case 'exposure.shown': {
+      const propositionId = e.subjectId ?? asString(e.payload['propositionId']);
+      if (!propositionId) return;
+      const day = asString(e.payload['day']) ?? e.occurredAt.slice(0, 10);
+      const previous = state.exposures[propositionId] ?? { propositionId, shown: 0, engaged: 0, skipped: 0 };
+      state.exposures[propositionId] = {
+        ...previous,
+        shown: previous.shown + 1,
+        lastShownAt: e.occurredAt,
+        lastShownDay: day,
+      };
       return;
+    }
+
+    case 'exposure.engaged': {
+      const propositionId = e.subjectId ?? asString(e.payload['propositionId']);
+      if (!propositionId) return;
+      const previous = state.exposures[propositionId] ?? { propositionId, shown: 0, engaged: 0, skipped: 0 };
+      state.exposures[propositionId] = { ...previous, engaged: previous.engaged + 1 };
+      return;
+    }
+
+    case 'exposure.skipped': {
+      const propositionId = e.subjectId ?? asString(e.payload['propositionId']);
+      if (!propositionId) return;
+      const previous = state.exposures[propositionId] ?? { propositionId, shown: 0, engaged: 0, skipped: 0 };
+      state.exposures[propositionId] = { ...previous, skipped: previous.skipped + 1 };
+      return;
+    }
   }
 }
 
@@ -265,6 +333,19 @@ export function cuesFor(state: LearnerState, propositionId: Id): Cue[] {
   return Object.values(state.cues)
     .filter((c) => c.propositionId === propositionId)
     .sort((a, b) => (a.createdAt === b.createdAt ? (a.id < b.id ? -1 : 1) : a.createdAt < b.createdAt ? -1 : 1));
+}
+
+/** Interests sorted by weight (highest first), deterministic tie-break by id. */
+export function interestsOf(state: LearnerState): Interest[] {
+  return Object.values(state.interests).sort((a, b) => {
+    if (a.weight !== b.weight) return b.weight - a.weight;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+}
+
+/** Exposure bookkeeping for one proposition (0s when never shown). */
+export function exposureOf(state: LearnerState, propositionId: Id): ExposureState {
+  return state.exposures[propositionId] ?? { propositionId, shown: 0, engaged: 0, skipped: 0 };
 }
 
 /** Chains where the proposition is the conclusion or one of the premises. */

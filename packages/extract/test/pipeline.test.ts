@@ -35,6 +35,7 @@ function fakeLlm(responses: string[]): FakeLlm {
 }
 
 const GOOD_OUTPUT = JSON.stringify({
+  domain: '经济学',
   propositions: [
     {
       ref: 'p1',
@@ -92,6 +93,7 @@ describe('extractCandidate', () => {
     const llm = fakeLlm(['```json\n' + GOOD_OUTPUT + '\n```']);
     const source = normalizeSource({ text: '测试文本', capturedAt: '2026-11-24T00:00:00.000Z' });
     const result = await extractCandidate(source, { llm });
+    expect(result.candidate.domain).toBe('经济学');
     expect(result.candidate.propositions).toHaveLength(3);
     expect(result.candidate.chains).toHaveLength(1);
     expect(result.promptVersion).toBe('extract-v1');
@@ -182,6 +184,10 @@ describe('merge plan + events', () => {
     expect(Object.keys(state.propositions)).toHaveLength(3);
     expect(Object.keys(state.cues)).toHaveLength(3);
     expect(Object.keys(state.chains)).toHaveLength(1);
+    // A capture is an interest signal: the domain is recorded even for new content.
+    expect(Object.keys(state.interests)).toHaveLength(1);
+    expect(Object.values(state.interests)[0]?.name).toBe('经济学');
+    expect(Object.values(state.propositions).every((p) => p.domain === '经济学')).toBe(true);
 
     const first = Object.values(state.propositions)[0]!;
     expect(first.provenance[0]?.title).toBe('经济学讲义');

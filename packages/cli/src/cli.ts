@@ -4,6 +4,7 @@
  *
  * - `replay` re-derives every projection from the event log and prints a digest.
  * - `eval` reports calibration (Brier / ECE / buckets) of the schedule model.
+ * - `feed` computes today's ad-like dose from interest + prerequisite structure.
  * - `import` / `export` move proposition packs and canonical JSONL logs.
  * - `doctor` validates a log line by line.
  * - `sample` writes a tiny demo pack.
@@ -15,6 +16,7 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { runDoctor } from './commands/doctor.js';
 import { runEval } from './commands/eval.js';
+import { runFeed } from './commands/feed.js';
 import { runExport } from './commands/export.js';
 import { runImport } from './commands/import.js';
 import { runReplay } from './commands/replay.js';
@@ -85,6 +87,25 @@ const COMMANDS: readonly CommandSpec[] = [
     defaults: { in: DEFAULT_EVENTS_FILE },
     examples: ['lattice eval --in events.jsonl', 'lattice eval --in events.jsonl --json'],
     run: runEval,
+  },
+  {
+    name: 'feed',
+    summary: '今日推送：按兴趣与先修结构生成广告式学习剂量（含原因与领域）',
+    usage: 'lattice feed --in <events.jsonl> [--dose 3] [--at <iso>] [--json]',
+    flags: [
+      IN_FLAG,
+      JSON_FLAG,
+      { name: 'dose', takesValue: true, desc: '今日推送条数（默认 3）' },
+      { name: 'at', takesValue: true, desc: '以指定 ISO 时间点计算（默认现在）' },
+    ],
+    required: [],
+    defaults: { in: DEFAULT_EVENTS_FILE, dose: '3' },
+    examples: [
+      'lattice feed --in events.jsonl',
+      'lattice feed --in events.jsonl --dose 5',
+      'lattice feed --in events.jsonl --json',
+    ],
+    run: runFeed,
   },
   {
     name: 'import',

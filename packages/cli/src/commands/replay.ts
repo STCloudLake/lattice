@@ -53,6 +53,8 @@ export interface ReplayReport {
   cueCount: number;
   chainCount: number;
   prerequisiteEdgeCount: number;
+  interestCount: number;
+  exposureCount: number;
   reviewCount: number;
   dueCount: number;
   newCount: number;
@@ -112,6 +114,8 @@ export function buildReplayReport(state: LearnerState, input: ReplayReportInput)
     cueCount: Object.keys(state.cues).length,
     chainCount: Object.keys(state.chains).length,
     prerequisiteEdgeCount: prerequisiteEdges(state).length,
+    interestCount: Object.keys(state.interests).length,
+    exposureCount: Object.keys(state.exposures).length,
     reviewCount: state.reviews.length,
     dueCount: dueItems(state, input.at).length,
     newCount: newItems(state, Number.POSITIVE_INFINITY).length,
@@ -135,6 +139,8 @@ export function renderReplayReport(report: ReplayReport): string {
       ['卡片数', String(report.cueCount)],
       ['推理链', String(report.chainCount)],
       ['先修关系', String(report.prerequisiteEdgeCount)],
+      ['兴趣领域', String(report.interestCount)],
+      ['已曝光', String(report.exposureCount)],
       ['复习数', String(report.reviewCount)],
       ['到期数', String(report.dueCount)],
       ['新学数', String(report.newCount)],

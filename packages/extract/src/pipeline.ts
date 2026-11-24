@@ -1,6 +1,7 @@
 import {
   assertChain,
   assertCue,
+  assertInterest,
   assertProposition,
   fnv1a64,
   type Actor,
@@ -151,6 +152,7 @@ export function buildMergePlan(
   options: MergeOptions = {},
 ): MergePlan {
   const plan: MergePlan = { create: [], reuse: [], cues: [], chains: [], dropped: [] };
+  if (candidate.domain && candidate.domain.trim().length > 0) plan.domain = candidate.domain.trim();
   const target = new Map<string, { kind: 'create' | 'reuse'; id?: Id }>();
 
   for (const proposition of candidate.propositions) {
@@ -245,6 +247,7 @@ export function planToEvents(plan: MergePlan, options: PlanToEventsOptions): Pla
       {
         statement: entry.statement,
         ...(entry.name ? { name: entry.name } : {}),
+        ...(plan.domain ? { domain: plan.domain } : {}),
         aliases: entry.aliases,
         provenance: entry.quote ? [provenanceFor(options.source, entry.quote)] : [provenance],
       },
@@ -254,6 +257,17 @@ export function planToEvents(plan: MergePlan, options: PlanToEventsOptions): Pla
     events.push(event);
   }
   for (const entry of plan.reuse) idsByRef.set(entry.ref, entry.existingId);
+
+  // A capture is an interest signal first: record the domain even when every
+  // proposition turned out to duplicate something we already had.
+  if (plan.domain) {
+    const { event } = assertInterest(
+      options.factory,
+      { domain: plan.domain, ...(options.source.sourceUri ? { sourceUri: options.source.sourceUri } : {}) },
+      { at, actor },
+    );
+    events.push(event);
+  }
 
   for (const cue of plan.cues) {
     const propositionId = idsByRef.get(cue.ref);

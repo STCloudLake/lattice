@@ -46,6 +46,8 @@ export interface ExtractedChain {
 }
 
 export interface ExtractionCandidate {
+  /** The domain/topic the passage belongs to (interest signal, not a quiz). */
+  domain?: string;
   propositions: ExtractedProposition[];
   chains: ExtractedChain[];
 }
@@ -79,6 +81,8 @@ export interface IdentityResult {
 }
 
 export interface MergePlan {
+  /** Domain carried into created propositions and the interest ledger. */
+  domain?: string;
   create: Array<{
     ref: string;
     statement: string;

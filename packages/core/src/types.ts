@@ -15,6 +15,7 @@ export type EventType =
   | 'proposition.asserted'
   | 'proposition.merged'
   | 'chain.asserted'
+  | 'interest.observed'
   | 'cue.asserted'
   | 'review.rated'
   | 'quiz.answered'
@@ -144,10 +145,34 @@ export interface MasterySummary {
   strength: number;
 }
 
+/** C ledger: what the learner showed interest in, derived from captures. */
+export interface Interest {
+  id: Id;
+  name: string;
+  /** Accumulated interest weight (captures count as evidence). */
+  weight: number;
+  captureCount: number;
+  lastSeenAt: ISODate;
+  topics: Record<string, number>;
+}
+
+/** C ledger: exposure bookkeeping. Never evidence of understanding. */
+export interface ExposureState {
+  propositionId: Id;
+  shown: number;
+  engaged: number;
+  skipped: number;
+  lastShownAt?: ISODate;
+  /** Local calendar day of the last exposure, used for daily de-duplication. */
+  lastShownDay?: string;
+}
+
 export interface LearnerState {
   propositions: Record<Id, Proposition>;
   cues: Record<Id, Cue>;
   chains: Record<Id, Chain>;
+  interests: Record<Id, Interest>;
+  exposures: Record<Id, ExposureState>;
   mastery: Record<Id, MasteryState>;
   schedule: Record<Id, ScheduleState>;
   reviews: ReviewLog[];

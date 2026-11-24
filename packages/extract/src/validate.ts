@@ -134,5 +134,12 @@ export function validateCandidateJson(raw: unknown): CandidateValidation {
 
   const hasError = issues.some((x) => x.severity === 'error');
   if (hasError) return { issues };
-  return { candidate: { propositions, chains }, issues };
+  const domainRaw = raw['domain'];
+  const candidate: ExtractionCandidate = { propositions, chains };
+  if (typeof domainRaw === 'string' && domainRaw.trim().length > 0) {
+    candidate.domain = domainRaw.trim().slice(0, 40);
+  } else if (domainRaw !== undefined) {
+    warn('domain', '领域名不是字符串，已忽略');
+  }
+  return { candidate, issues };
 }

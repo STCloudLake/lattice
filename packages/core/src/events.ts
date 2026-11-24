@@ -1,3 +1,4 @@
+import { fnv1a64 } from './ids.js';
 import type {
   Actor,
   CueKind,
@@ -172,6 +173,50 @@ export function mergeProposition(
   return factory('proposition.merged', input.fromId, payload, opts);
 }
 
+/** A capture is an interest signal for a domain, not a request to be quizzed. */
+export function assertInterest(
+  factory: EventFactory,
+  input: { domain: string; topics?: string[]; weight?: number; sourceUri?: string; title?: string },
+  opts?: { at?: ISODate; actor?: Actor },
+): { interestId: Id; event: LatticeEvent } {
+  const domain = input.domain.trim();
+  const interestId = 'dom_' + fnv1a64(domain.toLowerCase()).slice(0, 12);
+  const payload: Record<string, unknown> = { domain };
+  if (input.topics && input.topics.length > 0) payload.topics = input.topics;
+  if (input.weight !== undefined) payload.weight = input.weight;
+  if (input.sourceUri) payload.sourceUri = input.sourceUri;
+  if (input.title) payload.title = input.title;
+  return { interestId, event: factory('interest.observed', interestId, payload, opts) };
+}
+
+export function exposureShown(
+  factory: EventFactory,
+  input: { propositionId: Id; surface?: string; reason?: string; day?: string },
+  opts?: { at?: ISODate; actor?: Actor },
+): LatticeEvent {
+  const payload: Record<string, unknown> = {};
+  if (input.surface) payload.surface = input.surface;
+  if (input.reason) payload.reason = input.reason;
+  if (input.day) payload.day = input.day;
+  return factory('exposure.shown', input.propositionId, payload, opts);
+}
+
+export function exposureEngaged(
+  factory: EventFactory,
+  input: { propositionId: Id; surface?: string },
+  opts?: { at?: ISODate; actor?: Actor },
+): LatticeEvent {
+  return factory('exposure.engaged', input.propositionId, input.surface ? { surface: input.surface } : {}, opts);
+}
+
+export function exposureSkipped(
+  factory: EventFactory,
+  input: { propositionId: Id; surface?: string },
+  opts?: { at?: ISODate; actor?: Actor },
+): LatticeEvent {
+  return factory('exposure.skipped', input.propositionId, input.surface ? { surface: input.surface } : {}, opts);
+}
+
 export function resetMasteryEvent(factory: EventFactory, propositionId: Id, opts?: { at?: ISODate; actor?: Actor }): LatticeEvent {
   return factory('mastery.reset', propositionId, {}, opts);
 }
@@ -184,6 +229,7 @@ const KNOWN_TYPES: ReadonlySet<string> = new Set<EventType>([
   'proposition.asserted',
   'proposition.merged',
   'chain.asserted',
+  'interest.observed',
   'cue.asserted',
   'review.rated',
   'quiz.answered',
