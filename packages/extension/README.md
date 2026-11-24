@@ -83,8 +83,12 @@ MV3 默认不允许 WebAssembly 编译，默认也不给扩展页面跨源隔离
 填 `接口地址`、`模型`、`API Key`，可先「测试连接」（worker 发一次很小的 chat completion，
 回报延迟与模型名）。保存写入 `chrome.storage.local.latticeProvider`。
 
+- **模型名不写死在代码里**：点「拉取模型」会 `GET {接口地址}/models` 并用返回列表填充下拉候选。
+  厂商会改名（DeepSeek 已把 `deepseek-chat` 换成 `deepseek-flash`），这样改名不用等发版。
 - 请求是 OpenAI 兼容格式：`POST {接口地址}/chat/completions`，`Authorization: Bearer <key>`，
   body `{model, messages, temperature, max_tokens?, stream:false}`，读 `choices[0].message.content`。
+- 当前 DeepSeek 预设：接口地址 `https://api.deepseek.com`（带不带 `/v1` 都可），
+  模型 `deepseek-flash` 或 `deepseek-v4-pro`。以 `GET /models` 的结果为准。
 - 本机接口（`127.0.0.1` / `localhost`）允许空 Key。
 - **API Key 只在 `chrome.storage.local`**：不写 SQLite、不进事件日志、不进导出、诊断只显示
   `模型: <model> (<preset>)`。所有错误信息都做了 Key 脱敏。

@@ -16,10 +16,12 @@ const RPC_TIMEOUTS = { extractPreview: 150000, providerTest: 75000, commitExtrac
 /** One storage key holds the whole provider config — and nothing else holds the key. */
 const PROVIDER_STORAGE_KEY = 'latticeProvider';
 
+// Model names are NOT hardcoded per vendor: they change (DeepSeek renamed
+// deepseek-chat to deepseek-flash). The UI can pull the real list from /models.
 const PROVIDER_PRESETS = {
-  deepseek: { baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
-  openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
-  local: { baseUrl: 'http://127.0.0.1:11434/v1', model: 'qwen2.5:7b' },
+  deepseek: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash' },
+  openai: { baseUrl: 'https://api.openai.com/v1', model: '' },
+  local: { baseUrl: 'http://127.0.0.1:11434/v1', model: '' },
   custom: { baseUrl: '', model: '' },
 };
 
@@ -109,6 +111,8 @@ const els = {
   providerKey: $('provider-key'),
   providerStatus: $('provider-status'),
   providerError: $('provider-error'),
+  btnProviderModels: $('btn-provider-models'),
+  providerModelList: $('provider-model-list'),
   btnProviderTest: $('btn-provider-test'),
   btnProviderSave: $('btn-provider-save'),
 
@@ -306,18 +310,18 @@ function readProviderForm() {
 
 /** Chinese validation message, or '' when the form is usable. */
 function providerFormError(config) {
-  if (!config.baseUrl) return '请填写接口地址（例如 https://api.deepseek.com/v1）';
+  if (!config.baseUrl) return '请填写接口地址（例如 https://api.deepseek.com）';
   let url;
   try {
     url = new URL(config.baseUrl);
   } catch {
-    return '接口地址不是合法的 URL（例如 https://api.deepseek.com/v1）';
+    return '接口地址不是合法的 URL（例如 https://api.deepseek.com）';
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return '接口地址必须以 http:// 或 https:// 开头';
   if (url.protocol === 'http:' && !LOCAL_HOSTS.has(url.hostname)) {
     return '非本机接口必须使用 https://（本机可用 http://127.0.0.1 或 http://localhost）';
   }
-  if (!config.model) return '请填写模型名称（例如 deepseek-chat）';
+  if (!config.model) return '请填写模型名称（例如 deepseek-flash），或点「拉取模型」';
   if (!config.apiKey && !LOCAL_HOSTS.has(url.hostname)) return '请填写 API Key（本机接口可留空）';
   return '';
 }
@@ -413,6 +417,40 @@ function onProviderSave() {
     .catch(() => {
       showProviderError(`申请访问 ${origin} 的权限失败，请检查接口地址是否正确`);
     });
+}
+
+/**
+ * Asks the endpoint for its model list and fills the datalist. Exists so a
+ * renamed model is a two-click fix for the user, not a release.
+ */
+async function onProviderFetchModels() {
+  const config = readProviderForm();
+  if (!config.baseUrl) {
+    showProviderError('请先填写接口地址');
+    return;
+  }
+  els.btnProviderModels.disabled = true;
+  paintProviderStatus('正在获取模型列表…');
+  showProviderError('');
+  try {
+    const result = await rpc('listModels', { provider: config });
+    const models = Array.isArray(result.models) ? result.models : [];
+    els.providerModelList.replaceChildren(
+      ...models.map((id) => {
+        const option = document.createElement('option');
+        option.value = id;
+        return option;
+      }),
+    );
+    if (models.length > 0 && !els.providerModel.value) els.providerModel.value = models[0];
+    paintProviderStatus(`已获取 ${models.length} 个模型，从下拉列表中选择`);
+    toast(`找到 ${models.length} 个可用模型`);
+  } catch (err) {
+    paintProviderStatus('获取模型失败');
+    showProviderError(err?.message ?? String(err));
+  } finally {
+    els.btnProviderModels.disabled = false;
+  }
 }
 
 async function onProviderTest() {
@@ -1306,6 +1344,7 @@ function wire() {
   }
   els.providerPreset.addEventListener('change', onProviderPresetChange);
   els.btnProviderSave.addEventListener('click', onProviderSave);
+  els.btnProviderModels.addEventListener('click', () => void onProviderFetchModels());
   els.btnProviderTest.addEventListener('click', () => void onProviderTest());
 
   // Capture dialog

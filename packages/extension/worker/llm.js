@@ -42,7 +42,7 @@ function parseBaseUrl(baseUrl) {
   try {
     url = new URL(String(baseUrl));
   } catch {
-    throw new ProviderError('接口地址不是合法的 URL（例如 https://api.deepseek.com/v1）');
+    throw new ProviderError('接口地址不是合法的 URL（例如 https://api.deepseek.com）');
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new ProviderError('接口地址必须以 http:// 或 https:// 开头');
@@ -58,6 +58,12 @@ export function isLocalBaseUrl(baseUrl) {
   }
 }
 
+/** `https://x/v1` -> `https://x/v1/models`; a full endpoint is kept. */
+export function modelsEndpoint(baseUrl) {
+  const trimmed = String(baseUrl ?? '').trim().replace(/\/+$/, '');
+  return trimmed.endsWith('/models') ? trimmed : `${trimmed}/models`;
+}
+
 /** `https://x/v1` -> `https://x/v1/chat/completions`; a full endpoint is kept. */
 export function chatEndpoint(baseUrl) {
   const trimmed = String(baseUrl ?? '').trim().replace(/\/+$/, '');
@@ -68,23 +74,23 @@ export function chatEndpoint(baseUrl) {
  * Validates and normalizes the provider object coming from the page.
  * @returns {{preset: string, baseUrl: string, model: string, apiKey: string}}
  */
-export function normalizeProvider(raw) {
+export function normalizeProvider(raw, options = {}) {
   const input = raw && typeof raw === 'object' ? raw : {};
   const preset = PROVIDER_PRESETS.includes(input.preset) ? input.preset : 'custom';
   const baseUrl = typeof input.baseUrl === 'string' ? input.baseUrl.trim() : '';
   const model = typeof input.model === 'string' ? input.model.trim() : '';
   const apiKey = typeof input.apiKey === 'string' ? input.apiKey.trim() : '';
 
-  if (!baseUrl) throw new ProviderError('请先填写接口地址（例如 https://api.deepseek.com/v1）');
+  if (!baseUrl) throw new ProviderError('请先填写接口地址（例如 https://api.deepseek.com）');
   parseBaseUrl(baseUrl);
-  if (!model) throw new ProviderError('请先填写模型名称（例如 deepseek-chat）');
+  if (options.requireModel !== false && !model) throw new ProviderError('请先填写模型名称（例如 deepseek-flash）');
   if (!apiKey && !isLocalBaseUrl(baseUrl)) {
     throw new ProviderError('请先填写 API Key（本机接口可留空）');
   }
   return { preset, baseUrl, model, apiKey };
 }
 
-/** Human-readable label for the UI and the event actor: `deepseek-chat (deepseek)`. */
+/** Human-readable label for the UI and the event actor: `deepseek-flash (deepseek)`. */
 export function providerLabel(rawProvider) {
   const provider = normalizeProvider(rawProvider);
   return `${provider.model} (${provider.preset})`;
@@ -227,4 +233,63 @@ export async function testProvider(rawProvider, options = {}) {
     model: port.model,
     reply: String(reply).trim().slice(0, 40),
   };
+}
+
+/**
+ * Lists the models the endpoint actually serves. Model names change (DeepSeek
+ * renamed `deepseek-chat` to `deepseek-flash`), so the UI must be able to ask
+ * instead of hardcoding a list that rots.
+ */
+export async function listModels(rawProvider, options = {}) {
+  const provider = normalizeProvider(rawProvider, { requireModel: false });
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  if (typeof fetchImpl !== 'function') throw new ProviderError('当前环境不支持网络请求');
+  const timeoutMs =
+    Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : DEFAULT_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const endpoint = modelsEndpoint(provider.baseUrl);
+  try {
+    let response;
+    try {
+      response = await fetchImpl(endpoint, {
+        method: 'GET',
+        headers: { ...(provider.apiKey ? { Authorization: `Bearer ${provider.apiKey}` } : {}) },
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (err && err.name === 'AbortError') {
+        throw new ProviderError(`请求超时（${Math.round(timeoutMs / 1000)} 秒），请检查接口地址或网络`);
+      }
+      throw new ProviderError('无法连接到接口地址（网络错误或地址不正确）');
+    }
+
+    let text;
+    try {
+      text = await response.text();
+    } catch {
+      throw new ProviderError('读取模型列表失败（网络中断）');
+    }
+    if (!response.ok) {
+      throw new ProviderError(httpErrorMessage(response.status, sanitizeDetail(text, provider.apiKey)), {
+        status: response.status,
+      });
+    }
+
+    let payload;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      throw new ProviderError('模型列表不是合法 JSON，请检查接口地址是否指向 OpenAI 兼容服务');
+    }
+    const rows = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload?.models) ? payload.models : [];
+    const names = rows
+      .map((row) => (typeof row === 'string' ? row : row && typeof row.id === 'string' ? row.id : row && typeof row.name === 'string' ? row.name : ''))
+      .filter((name) => typeof name === 'string' && name.length > 0);
+    const models = [...new Set(names)].sort();
+    if (models.length === 0) throw new ProviderError('接口没有返回任何模型（/models）');
+    return { models, count: models.length, endpoint };
+  } finally {
+    clearTimeout(timer);
+  }
 }

@@ -27,6 +27,8 @@ import { openService } from '../worker/service.js';
 import {
   createLlmPort,
   chatEndpoint,
+  listModels,
+  modelsEndpoint,
   normalizeProvider,
   ProviderError,
   testProvider,
@@ -175,7 +177,7 @@ async function main() {
   // -------------------------------------------------------------------------
   let seen = null;
   const happyPort = createLlmPort(
-    { preset: 'deepseek', baseUrl: 'https://api.deepseek.com/v1/', model: 'deepseek-chat', apiKey: SECRET_KEY },
+    { preset: 'deepseek', baseUrl: 'https://api.deepseek.com/v1/', model: 'deepseek-flash', apiKey: SECRET_KEY },
     { fetchImpl: async (url, init) => { seen = { url, init }; return contentResponse('{"ok":true}'); } },
   );
   const happyContent = await happyPort.complete({
@@ -193,7 +195,7 @@ async function main() {
   });
   check('请求体：model / messages / temperature / max_tokens / stream:false', () => {
     const body = JSON.parse(seen.init.body);
-    assert.equal(body.model, 'deepseek-chat');
+    assert.equal(body.model, 'deepseek-flash');
     assert.equal(body.temperature, 0.2);
     assert.equal(body.max_tokens, 64);
     assert.equal(body.stream, false);
@@ -298,14 +300,14 @@ async function main() {
   // -------------------------------------------------------------------------
   const testTarget = makeProviderFetch(() => contentResponse('OK'));
   const providerTestResult = await testProvider(
-    { preset: 'deepseek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', apiKey: SECRET_KEY },
+    { preset: 'deepseek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-flash', apiKey: SECRET_KEY },
     { fetchImpl: testTarget.fetchImpl },
   );
   check('返回 ok / latencyMs / model / reply', () => {
     assert.equal(providerTestResult.ok, true);
     assert.equal(typeof providerTestResult.latencyMs, 'number');
     assert.ok(providerTestResult.latencyMs >= 0);
-    assert.equal(providerTestResult.model, 'deepseek-chat');
+    assert.equal(providerTestResult.model, 'deepseek-flash');
     assert.equal(providerTestResult.reply, 'OK');
   });
 
@@ -533,6 +535,43 @@ async function main() {
 
     await checkAsync('空文本 -> 内容为空', async () => {
       await assert.rejects(() => errorService.extractPreview({ text: '   ', provider: PROVIDER }), /内容为空/);
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  step('模型列表：GET /models（模型改名时可自助修复）');
+  // -------------------------------------------------------------------------
+  {
+    const seenUrls = [];
+    const modelsFetch = async (url) => {
+      seenUrls.push(String(url));
+      return jsonResponse({
+        object: 'list',
+        data: [{ id: 'deepseek-v4-pro' }, { id: 'deepseek-flash' }, { id: 'deepseek-flash' }],
+      });
+    };
+    const result = await listModels(
+      { preset: 'deepseek', baseUrl: 'https://api.deepseek.com', model: '', apiKey: 'sk-test' },
+      { fetchImpl: modelsFetch },
+    );
+    await checkAsync('未填模型也能拉取列表', async () => {
+      assert.deepEqual(result.models, ['deepseek-flash', 'deepseek-v4-pro']);
+      assert.equal(result.count, 2);
+    });
+    await checkAsync('endpoint 不带重复 /models', async () => {
+      assert.equal(result.endpoint, 'https://api.deepseek.com/models');
+      assert.equal(modelsEndpoint('https://api.deepseek.com/models/'), 'https://api.deepseek.com/models');
+      assert.equal(seenUrls[0], 'https://api.deepseek.com/models');
+    });
+    await checkAsync('401 映射为中文错误', async () => {
+      await assert.rejects(
+        () =>
+          listModels(
+            { preset: 'deepseek', baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test' },
+            { fetchImpl: async () => jsonResponse({ error: { message: 'bad key' } }, 401) },
+          ),
+        /API Key 无效/,
+      );
     });
   }
 

@@ -85,6 +85,7 @@ const OPS = {
   extractPreview: (service, args) => service.extractPreview(args),
   commitExtraction: (service, args) => service.commitExtraction(args),
   providerTest: (service, args) => service.providerTest(args),
+  listModels: (service, args) => service.listModels(args || {}),
   coverageCheck: (service, args) => service.coverageCheck(args),
   graphSummary: (service) => service.graphSummary(),
 };

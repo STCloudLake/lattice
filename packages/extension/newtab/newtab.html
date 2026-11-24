@@ -178,11 +178,12 @@
           </label>
           <label class="field">
             <span>接口地址</span>
-            <input type="text" id="provider-base-url" autocomplete="off" spellcheck="false" placeholder="https://api.deepseek.com/v1" />
+            <input type="text" id="provider-base-url" autocomplete="off" spellcheck="false" placeholder="https://api.deepseek.com" />
           </label>
           <label class="field">
             <span>模型</span>
-            <input type="text" id="provider-model" autocomplete="off" spellcheck="false" placeholder="deepseek-chat" />
+            <input type="text" id="provider-model" autocomplete="off" spellcheck="false" placeholder="deepseek-flash" list="provider-model-list" />
+            <datalist id="provider-model-list"></datalist>
           </label>
           <label class="field">
             <span>API Key</span>
@@ -191,6 +192,7 @@
           <p class="hint muted" id="provider-status">尚未配置模型</p>
           <p class="error multiline" id="provider-error" hidden></p>
           <div class="row">
+            <button class="btn" id="btn-provider-models" type="button">拉取模型</button>
             <button class="btn" id="btn-provider-test" type="button">测试连接</button>
             <button class="btn primary" id="btn-provider-save" type="button">保存</button>
           </div>

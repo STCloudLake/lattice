@@ -41,7 +41,13 @@ import {
   samplesFromState,
   stateDigest,
 } from '../vendor/lattice-core/index.js';
-import { createLlmPort, normalizeProvider, providerLabel as formatProviderLabel, testProvider } from './llm.js';
+import {
+  createLlmPort,
+  listModels,
+  normalizeProvider,
+  providerLabel as formatProviderLabel,
+  testProvider,
+} from './llm.js';
 import { normalizeStatement } from './util.js';
 
 /** How many new propositions a single queue may introduce. */
@@ -717,6 +723,11 @@ export class LatticeService {
   async providerTest(input = {}) {
     const provider = normalizeProvider(input.provider);
     return testProvider(provider, { fetchImpl: this.#fetchImpl });
+  }
+
+  /** Asks the endpoint which models it serves (GET /models). */
+  async listModels(input = {}) {
+    return listModels(input.provider, { fetchImpl: this.#fetchImpl });
   }
 
   /** Hard delete of the whole log, keeping the device id. */

@@ -20,7 +20,7 @@ is a *view* derived from chains (`prerequisiteEdges`), so the graph view and the
 path planner can never disagree.
 
 ```json
-{"id":"01j8x2k4m0002abcdef","deviceId":"ext-a1b2c3","seq":43,"occurredAt":"2026-11-24T09:13:00.000Z","recordedAt":"2026-11-24T09:13:00.000Z","actor":"llm:deepseek-chat@extract-v1","type":"chain.asserted","subjectId":"k_01","payload":{"premises":["p_a","p_b"],"conclusion":"p_c","strength":0.8,"provenance":[{"sourceKind":"page","sourceUri":"https://example.com/lesson","capturedAt":"2026-11-24T09:12:00.000Z"}]}}
+{"id":"01j8x2k4m0002abcdef","deviceId":"ext-a1b2c3","seq":43,"occurredAt":"2026-11-24T09:13:00.000Z","recordedAt":"2026-11-24T09:13:00.000Z","actor":"llm:deepseek-flash@extract-v1","type":"chain.asserted","subjectId":"k_01","payload":{"premises":["p_a","p_b"],"conclusion":"p_c","strength":0.8,"provenance":[{"sourceKind":"page","sourceUri":"https://example.com/lesson","capturedAt":"2026-11-24T09:12:00.000Z"}]}}
 ```
 
 ### Provenance
