@@ -1,0 +1,28 @@
+{
+  "name": "lattice",
+  "private": true,
+  "version": "0.1.0-m0",
+  "description": "Lattice — an inspectable learner model (M0 skeleton)",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @lattice/core && node scripts/build-extension.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "npm run typecheck -w @lattice/core",
+    "cli": "tsx packages/cli/src/cli.ts"
+  },
+  "devDependencies": {
+    "@sqlite.org/sqlite-wasm": "^3.54.1-build1",
+    "@types/node": "^26.6.6",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.1"
+  },
+  "dependencies": {
+    "ts-fsrs": "^5.4.2"
+  }
+}

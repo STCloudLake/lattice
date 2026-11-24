@@ -1,0 +1,146 @@
+/**
+ * Core types for Lattice.
+ *
+ * The four ledgers (see docs/design): knowledge (propositions/cues), mastery
+ * (understanding), schedule (availability), context (attention). Everything
+ * except the raw event log is a projection and can be rebuilt by replay.
+ */
+
+export type Id = string;
+export type ISODate = string;
+
+export type Actor = 'human' | 'system' | `llm:${string}`;
+
+export type EventType =
+  | 'proposition.asserted'
+  | 'proposition.merged'
+  | 'cue.asserted'
+  | 'review.rated'
+  | 'quiz.answered'
+  | 'exposure.shown'
+  | 'exposure.engaged'
+  | 'exposure.skipped'
+  | 'mastery.reset'
+  | 'data.cleared';
+
+export interface LatticeEvent {
+  /** Globally unique (ULID-like). Also the merge key across devices. */
+  id: Id;
+  /** Stable per-device identity; used for ordering and idempotency. */
+  deviceId: string;
+  /** Monotonic per device. */
+  seq: number;
+  /** When the fact happened (user-facing truth). */
+  occurredAt: ISODate;
+  /** When it was written. Differs from occurredAt when offline. */
+  recordedAt: ISODate;
+  actor: Actor;
+  type: EventType;
+  subjectId?: Id;
+  payload: Record<string, unknown>;
+}
+
+export type PropositionStatus = 'active' | 'superseded' | 'archived';
+
+/** K ledger: an objective claim. Never carries learner state. */
+export interface Proposition {
+  id: Id;
+  statement: string;
+  name?: string;
+  aliases: string[];
+  domain?: string;
+  status: PropositionStatus;
+  createdAt: ISODate;
+  mergedInto?: Id;
+}
+
+export type CueKind = 'recall' | 'cloze' | 'apply' | 'contrast';
+
+/** K ledger: one retrieval route for a proposition. Many cues share one schedule. */
+export interface Cue {
+  id: Id;
+  propositionId: Id;
+  front: string;
+  back: string;
+  kind: CueKind;
+  createdAt: ISODate;
+}
+
+/** 1 = Again, 2 = Hard, 3 = Good, 4 = Easy (matches ts-fsrs Rating). */
+export type Grade = 1 | 2 | 3 | 4;
+
+/** Evidence channel 2 (retrieval). Projection of review.rated events. */
+export interface ReviewLog {
+  id: Id;
+  cueId: Id;
+  propositionId: Id;
+  grade: Grade;
+  /** Days since previous review of this proposition (0 for the first). */
+  elapsedDays: number;
+  /** Model-predicted recall probability right before this review (0 = unknown/new). */
+  rBefore: number;
+  reviewedAt: ISODate;
+}
+
+export type ScheduleStage = 'new' | 'learning' | 'review' | 'relearning';
+
+/** S ledger: availability. One per proposition. */
+export interface ScheduleState {
+  propositionId: Id;
+  stability: number;
+  difficulty: number;
+  stage: ScheduleStage;
+  dueAt: ISODate;
+  lastReviewAt?: ISODate;
+  reviewCount: number;
+  lapses: number;
+  learningSteps: number;
+  scheduledDays: number;
+}
+
+/** M ledger: understanding. Beta posterior over "the learner understands it". */
+export interface MasteryState {
+  propositionId: Id;
+  alpha: number;
+  beta: number;
+  evidenceCount: number;
+  updatedAt: ISODate;
+}
+
+export interface MasterySummary {
+  /** Posterior mean, 0..1. */
+  mean: number;
+  /** Approximate 10th percentile, 0..1. */
+  low: number;
+  /** Approximate 90th percentile, 0..1. */
+  high: number;
+  /** Pseudo-sample size (alpha + beta - 4), i.e. how much evidence we have. */
+  strength: number;
+}
+
+export interface LearnerState {
+  propositions: Record<Id, Proposition>;
+  cues: Record<Id, Cue>;
+  mastery: Record<Id, MasteryState>;
+  schedule: Record<Id, ScheduleState>;
+  reviews: ReviewLog[];
+}
+
+export type EvidenceKind = 'quiz' | 'recall' | 'explain';
+
+export interface QueueItem {
+  kind: 'review' | 'new';
+  propositionId: Id;
+  cueId: Id;
+  /** Present for review items. */
+  dueAt?: ISODate;
+}
+
+export interface QueueOptions {
+  /** Max new propositions introduced per queue build. */
+  newLimit?: number;
+  /** Max reviews per queue build (0 = unlimited). */
+  reviewLimit?: number;
+  /** Keep reviews due before this instant, default: now. */
+  now?: ISODate;
+}

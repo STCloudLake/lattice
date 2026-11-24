@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.vendor/
+spike/
+*.log
+.DS_Store
+packages/extension/vendor/
+data/
