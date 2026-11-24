@@ -6,3 +6,4 @@ spike/
 .DS_Store
 packages/extension/vendor/
 data/
+tmp-m0/

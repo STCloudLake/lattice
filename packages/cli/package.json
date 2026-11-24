@@ -1,0 +1,19 @@
+{
+  "name": "@lattice/cli",
+  "version": "0.1.0-m0",
+  "description": "Lattice CLI: replay, eval, import, export, doctor, sample (M0 developer surface)",
+  "type": "module",
+  "bin": {
+    "lattice": "./src/cli.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "cli": "tsx src/cli.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@lattice/core": "*"
+  }
+}
