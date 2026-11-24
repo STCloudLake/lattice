@@ -24,7 +24,9 @@ The one rule that shapes the whole design: **attention is not evidence of unders
 ```bash
 npm install
 npm run build          # compiles @lattice/core and bundles the extension
-npm test               # 30 core tests + CLI tests
+npm test               # 37 tests (core + CLI)
+npm run verify         # 7 acceptance checks
+npm run verify:e2e     # + loads the extension in a real browser (needs Chrome/Edge)
 ```
 
 ### Load the extension
@@ -32,10 +34,10 @@ npm test               # 30 core tests + CLI tests
 1. Open `chrome://extensions` (Edge: `edge://extensions`)
 2. Enable **Developer mode**
 3. **Load unpacked** → select `packages/extension`
-4. Open a new tab. On first run, click **载入示例包** (load sample pack) to get 8 propositions.
+4. Open a new tab. On first run, click **载入示例包** (load sample pack) to get 8 propositions / 12 cards.
 5. Review a few cards, then open **诊断** to see the digest and the calibration report.
 
-The extension stores its database in the browser's OPFS via a dedicated Web Worker (see [docs/storage.md](docs/storage.md)). It falls back to `chrome.storage` if OPFS is unavailable, and says so in 诊断.
+The extension stores its database in the browser's OPFS via a dedicated Web Worker (see [docs/storage.md](docs/storage.md)). It falls back to `chrome.storage` if OPFS is unavailable, and says so in 诊断. This path is covered by an automated test that loads the real extension in headless Edge/Chrome over CDP (`npm run test:e2e`).
 
 ### CLI
 
@@ -59,8 +61,9 @@ packages/core/         @lattice/core — pure TypeScript, zero IO
   test/                30 unit tests
 packages/extension/    MV3 extension (plain JS/HTML, no build step)
   newtab/              review UI
-  worker.js            sqlite-wasm + OPFS, the only place that touches storage
+  worker/              sqlite-wasm + OPFS/RPC, the only place that touches storage
   data/                bundled sample pack
+  test/                data-layer smoke test + real-browser E2E (headless Edge/Chrome)
 packages/cli/          @lattice/cli — replay / eval / import / export / doctor / sample
 scripts/               build-extension.mjs (bundles core + vendors sqlite-wasm)
 examples/              sample proposition pack

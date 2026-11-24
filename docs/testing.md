@@ -25,7 +25,7 @@ the diagnostics text (one button copies it).
 
 ## Part B — the spine (5 minutes)
 
-1. Click **载入示例包**. Expect `8 命题 / 11 张卡`.
+1. Click **载入示例包**. Expect `8 命题 / 12 张卡`.
 2. Open **诊断** → note `存储: OPFS` (or `回退(chrome.storage)` — tell me which).
 3. Review 5 cards:
    - click **显示答案** (or press Space), then pick a grade with `1`–`4`;

@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Lattice (M0)",
+  "version": "0.1.0",
+  "description": "An inspectable learner model — M0 skeleton",
+  "permissions": ["storage", "unlimitedStorage"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "chrome_url_overrides": {
+    "newtab": "newtab/newtab.html"
+  },
+  "action": {
+    "default_title": "Lattice"
+  },
+  "minimum_chrome_version": "120",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "cross_origin_embedder_policy": {
+    "value": "require-corp"
+  },
+  "cross_origin_opener_policy": {
+    "value": "same-origin"
+  }
+}

@@ -5,5 +5,7 @@ spike/
 *.log
 .DS_Store
 packages/extension/vendor/
-data/
 tmp-m0/
+/data/
+!packages/extension/data/
+!packages/extension/data/**
