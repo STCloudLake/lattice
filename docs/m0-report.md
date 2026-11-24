@@ -116,6 +116,16 @@ Recorded here so they are not mistaken for unknowable behaviour later.
 | FTS5 / search | none in M0 | the CJK tokenizer decision is a real design choice, deferred to M2 |
 | `data.cleared` as an event | the UI hard-deletes rows; the event type exists for future use | deletion must be deletion, not another row |
 
+### 4.1 Issues found while installing it for real
+
+Installing into a live Edge profile (rather than only running the headless E2E) surfaced three things that tests did not:
+
+1. **Diagnostics showed a misleading warning in OPFS mode.** It printed "未检测到 chrome.storage，本次仅内存，关闭页面后丢失" whenever `persisted` was false — but `persisted` only describes the *fallback* channel. Fixed: the note now requires `storage === 'fallback'`.
+2. **The fallback's persistence channel may not exist.** `chrome.storage` was **not** exposed inside the extension's dedicated Web Worker (`typeof chrome?.storage` was undefined there), so the `:memory:` + `chrome.storage.local` mirror would silently not persist. OPFS works in the target browsers, so M0 is unaffected in practice, but the "never brick" promise is not yet true. M0.1 must switch the fallback to **IndexedDB**, which is available in workers.
+3. **Edge masks the newtab override URL.** A new tab renders the extension's page but the address bar stays `edge://newtab/`. Verified with a minimal two-file control extension: the override is real, the URL is just masked. Nothing to fix; do not use the URL as evidence in future tests.
+
+Also confirmed during install: the profile keeps the OPFS database across restarts (digest `bc99c87be08a6089` before and after a reload with 21 events), and the diagnostics panel reports `存储: OPFS · VFS: opfs`.
+
 ---
 
 ## 5. What M0 proves, and what it does not

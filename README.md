@@ -39,6 +39,8 @@ npm run verify:e2e     # + loads the extension in a real browser (needs Chrome/E
 
 The extension stores its database in the browser's OPFS via a dedicated Web Worker (see [docs/storage.md](docs/storage.md)). It falls back to `chrome.storage` if OPFS is unavailable, and says so in 诊断. This path is covered by an automated test that loads the real extension in headless Edge/Chrome over CDP (`npm run test:e2e`).
 
+**Run it again later:** double-click `start-lattice.cmd` (a desktop shortcut can point at it). It opens Edge with the unpacked extension loaded in a dedicated, gitignored profile (`.browser-profile/`) so your daily browsing profile is untouched. Unpacked MV3 extensions cannot be installed silently into a normal browser profile — that is a browser security gate — so a launcher is the reproducible way to run M0; installing it permanently in your everyday browser takes the four clicks above, once.
+
 ### CLI
 
 ```bash

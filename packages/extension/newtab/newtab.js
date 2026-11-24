@@ -457,7 +457,9 @@ function formatDiagnostics(info) {
   lines.push('Lattice M0 诊断');
   lines.push(`存储: ${storageLabel(info)}`);
   if (info.storageDetail) lines.push(`  VFS: ${info.storageDetail}`);
-  if (!info.persisted) lines.push('  备注: 未检测到 chrome.storage，本次仅内存，关闭页面后丢失');
+  if (info.storage === 'fallback' && !info.persisted) {
+    lines.push('  备注: 回退模式下未检测到可用的持久化通道，本次仅内存，关闭页面后丢失');
+  }
   lines.push(`设备 ID: ${info.deviceId}`);
   lines.push(`事件序号: ${info.lastSeq}`);
   lines.push(`校验摘要: ${info.digest}`);

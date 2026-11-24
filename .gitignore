@@ -6,6 +6,7 @@ spike/
 .DS_Store
 packages/extension/vendor/
 tmp-m0/
+.browser-profile/
 /data/
 !packages/extension/data/
 !packages/extension/data/**
