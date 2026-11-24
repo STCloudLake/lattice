@@ -173,6 +173,12 @@ check('chain events survive replay + doctor', () => {
   }
 });
 
+check('background capture orchestration', () => {
+  const out = run(process.execPath, ['packages/extension/test/background-smoke.mjs']);
+  if (!out.includes('BACKGROUND SMOKE OK')) throw new Error('background smoke did not report OK');
+  return '7 cases';
+});
+
 check('extraction capture smoke test', () => {
   const out = run(process.execPath, ['packages/extension/test/capture-smoke.mjs']);
   if (!out.includes('CAPTURE SMOKE OK')) throw new Error('capture smoke did not report OK');

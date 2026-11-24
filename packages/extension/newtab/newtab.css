@@ -157,6 +157,9 @@ kbd {
   padding: 0 4px; color: var(--muted); background: transparent;
 }
 
+/* ---- capture entry (topbar) ------------------------------------------ */
+.capture-top { font-size: 13px; padding: 4px 12px; border: 1px solid var(--line); }
+
 /* ---- footer ---------------------------------------------------------- */
 
 .footer { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }

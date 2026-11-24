@@ -15,6 +15,7 @@ const RPC_TIMEOUTS = { extractPreview: 150000, providerTest: 75000, commitExtrac
 
 /** One storage key holds the whole provider config — and nothing else holds the key. */
 const PROVIDER_STORAGE_KEY = 'latticeProvider';
+const PENDING_CAPTURE_KEY = 'latticePendingCapture';
 
 // Model names are NOT hardcoded per vendor: they change (DeepSeek renamed
 // deepseek-chat to deepseek-flash). The UI can pull the real list from /models.
@@ -48,6 +49,7 @@ const els = {
   viewFatal: $('view-fatal'),
 
   btnSample: $('btn-sample'),
+  btnCaptureTop: $('btn-capture-top'),
   btnCaptureEmpty: $('btn-capture-empty'),
   btnImportPackFile: $('btn-import-pack-file'),
   btnPastePack: $('btn-paste-pack'),
@@ -155,6 +157,8 @@ const els = {
 
 const state = {
   mode: 'review', // 'review' | 'quiz'
+  captureSourceKind: 'paste',
+  captureSourceUri: '',
   payload: null,
   card: null,
   cardShownAt: 0,
@@ -497,6 +501,7 @@ async function boot() {
       toast(`存储回退：${detail}；原因可在「诊断」里查看`, 5600);
     }
     await refresh();
+    await consumePendingCapture();
   } catch (err) {
     fail(err && err.message ? err.message : String(err));
   }
@@ -882,9 +887,59 @@ async function clearAll() {
 // and only then does the page send the (filtered) JSON plan back to the worker.
 // ---------------------------------------------------------------------------
 
+/**
+ * Picks up a page capture handed over by background.js (toolbar click or the
+ * selection context menu), prefills the dialog and starts extraction. The model
+ * call only happens if a provider is configured; otherwise the text is kept so
+ * the user can configure the model and press 抽取.
+ */
+async function consumePendingCapture() {
+  const area = storageArea();
+  if (!area) return;
+  let pending = null;
+  try {
+    const got = (await area.get(PENDING_CAPTURE_KEY)) ?? {};
+    pending = got[PENDING_CAPTURE_KEY] ?? null;
+  } catch {
+    return;
+  }
+  if (!pending) return;
+  try {
+    if (typeof area.remove === 'function') await area.remove(PENDING_CAPTURE_KEY);
+  } catch {
+    /* ignoring: the payload is consumed in this page anyway */
+  }
+
+  openCaptureDialog();
+  if (!pending.ok) {
+    showCaptureError(`无法捕获这个页面：${pending.reason || '未知原因'}`);
+    return;
+  }
+
+  els.captureTitle.value = pending.title || '';
+  els.captureText.value = pending.text || '';
+  state.captureSourceKind = 'page';
+  state.captureSourceUri = pending.url || '';
+  paintCaptureProviderLine();
+
+  if (pending.truncated) {
+    toast('页面正文较长，已截断到约 12000 字', 4800);
+  } else {
+    toast(pending.hasSelection ? '已抓取选中文字，正在抽取…' : '已抓取页面正文，正在抽取…');
+  }
+
+  if (state.provider && providerReady(state.provider)) {
+    void runExtraction(false);
+  } else {
+    showCaptureError('正文已抓取。请先点右上角 ⚙ 配置模型，然后点「抽取」。');
+  }
+}
+
 function openCaptureDialog() {
   state.capture = null;
   state.captureForce = false;
+  state.captureSourceKind = 'paste';
+  state.captureSourceUri = '';
   els.captureTitle.value = '';
   els.captureText.value = '';
   els.captureStatus.hidden = true;
@@ -966,7 +1021,8 @@ async function runExtraction(force = false) {
     const result = await rpc('extractPreview', {
       text,
       title: els.captureTitle.value.trim(),
-      sourceKind: 'paste',
+      sourceKind: state.captureSourceKind || 'paste',
+      sourceUri: state.captureSourceUri || undefined,
       provider: state.provider,
       force,
     });
@@ -1293,6 +1349,7 @@ async function flushPersistence() {
 function wire() {
   // Empty state
   els.btnSample.addEventListener('click', () => void loadSamplePack());
+  els.btnCaptureTop.addEventListener('click', openCaptureDialog);
   els.btnCaptureEmpty.addEventListener('click', openCaptureDialog);
   els.btnImportPackFile.addEventListener('click', () => els.filePack.click());
   els.btnPastePack.addEventListener('click', () => {
