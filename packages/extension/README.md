@@ -175,7 +175,7 @@ aria-hidden，优先 article/main/role=main，否则按段落密度选容器，�
 
 **改完扩展文件后必须「重新加载」**：`edge://extensions` → 本扩展 → 重新加载。
 只是重启浏览器**不保证**刷新 service worker（Chromium 会按扩展版本缓存代码）。
-诊断里的 `后台: m1b-capture-1 ✓` 就是用来暴露这个问题的——如果显示「后台: 未响应」，
+诊断里的 `后台: m2c-3 ✓` 就是用来暴露这个问题的——如果显示「后台: 未响应」，
 说明后台是旧版本，重载即可。发版时请同时 bump `manifest.json` 的 version。
 
 ## 捕获文本（M1a）

@@ -13,7 +13,7 @@
  */
 
 /** Shown in 诊断 so a stale service worker is visible instead of silent. */
-const BUILD = 'm1b-capture-1';
+const BUILD = 'm2c-3';
 
 const MENU_SELECTION = 'lattice-capture-selection';
 const PENDING_KEY = 'latticePendingCapture';

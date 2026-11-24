@@ -2,7 +2,7 @@
 
 **An inspectable learner model for ambient learning.** Local-first, open source (Apache-2.0), no account, no telemetry.
 
-> Status: **M2a** — capture a page (toolbar icon) and it becomes an **interest signal**: an LLM extracts propositions + reasoning chains + a domain, prerequisite structure is derived, and a small daily dose is pushed into the new tab **like an ad** (know it / not interested / test me). Exposure is tracked in the context ledger and never inflates mastery. Sidebar/notification surfaces, held-back counterfactuals and PDF capture are still ahead. See [docs/m2-feed.md](docs/m2-feed.md) for the push design and [docs/m0-report.md](docs/m0-report.md) for the spine.
+> Status: **M2c** — declare the domains you care about (defaults: 计算机 / 人工智能) and Lattice prepares and pushes content at your level: a bundled beginner curriculum seeds the graph on first run, then the system generates the next prerequisite-ordered batch when a domain runs thin. Capture a page and it counts as interest evidence. Delivery is ad-like (small daily dose, know it / not interested / test me), and exposure never inflates mastery. Sidebar/notification surfaces and held-back counterfactuals are still ahead. See [docs/m2-feed.md](docs/m2-feed.md) and [docs/m0-report.md](docs/m0-report.md).
 
 Lattice keeps four separate ledgers about a learner and never mixes them:
 
