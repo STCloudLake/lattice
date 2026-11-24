@@ -18,6 +18,7 @@ export type EventType =
   | 'interest.observed'
   | 'interest.declared'
   | 'interest.removed'
+  | 'domain.alias'
   | 'cue.asserted'
   | 'review.rated'
   | 'quiz.answered'
@@ -149,6 +150,14 @@ export interface MasterySummary {
 
 export type DomainLevel = 'beginner' | 'intermediate' | 'advanced';
 
+/** An explicit alias decision: `alias` is the same field as `canonical`. */
+export interface DomainAlias {
+  alias: string;
+  canonical: string;
+  decidedBy: string;
+  at: ISODate;
+}
+
 /** C ledger: what the learner is interested in. Declared beats inferred. */
 export interface Interest {
   id: Id;
@@ -181,6 +190,8 @@ export interface LearnerState {
   chains: Record<Id, Chain>;
   interests: Record<Id, Interest>;
   exposures: Record<Id, ExposureState>;
+  /** Alias rules declared in the log, applied when replay canonicalizes domains. */
+  domainAliases: DomainAlias[];
   mastery: Record<Id, MasteryState>;
   schedule: Record<Id, ScheduleState>;
   reviews: ReviewLog[];

@@ -205,8 +205,11 @@ async function main() {
       assert.equal(item.reason, 'foundation');
     }
   });
-  check('示例包里每条命题都带领域', () => {
-    for (const item of feed.items) assert.ok(['economics', 'learning'].includes(item.domain), `domain=${item.domain}`);
+  check('示例包里每条命题都带（规范化的）领域', () => {
+    // Domain aliases canonicalize at replay: 'economics' -> '经济学'.
+    for (const item of feed.items) {
+      assert.ok(['经济学', 'learning'].includes(item.domain), `domain=${item.domain}`);
+    }
   });
   check('feed 是纯读：不写任何事件', () => assert.equal(service.exportJsonl().events, eventsBeforeFeed));
   check('剂量可调：dose 5 -> 5 条，dose 1 -> 1 条', () => {

@@ -1,5 +1,6 @@
 export * from './types.js';
 export * from './ids.js';
+export * from './domains.js';
 export * from './events.js';
 export * from './fsrs.js';
 export * from './mastery.js';

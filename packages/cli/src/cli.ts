@@ -15,6 +15,7 @@
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { runDoctor } from './commands/doctor.js';
+import { runDomains } from './commands/domains.js';
 import { runEval } from './commands/eval.js';
 import { runFeed } from './commands/feed.js';
 import { runExport } from './commands/export.js';
@@ -87,6 +88,16 @@ const COMMANDS: readonly CommandSpec[] = [
     defaults: { in: DEFAULT_EVENTS_FILE },
     examples: ['lattice eval --in events.jsonl', 'lattice eval --in events.jsonl --json'],
     run: runEval,
+  },
+  {
+    name: 'domains',
+    summary: '兴趣领域：规范名、别名归并、声明/推断、权重与时间衰减',
+    usage: 'lattice domains --in <events.jsonl> [--at <iso>] [--json]',
+    flags: [IN_FLAG, JSON_FLAG, { name: 'at', takesValue: true, desc: '以指定 ISO 时间点计算衰减（默认现在）' }],
+    required: [],
+    defaults: { in: DEFAULT_EVENTS_FILE },
+    examples: ['lattice domains --in events.jsonl', 'lattice domains --in events.jsonl --json'],
+    run: runDomains,
   },
   {
     name: 'feed',

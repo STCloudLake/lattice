@@ -213,6 +213,24 @@ export function removeInterest(
   return { interestId, event: factory('interest.removed', interestId, { domain }, opts) };
 }
 
+/** Declares that `alias` and `canonical` are the same domain. */
+export function aliasDomain(
+  factory: EventFactory,
+  input: { alias: string; canonical: string; decidedBy?: string },
+  opts?: { at?: ISODate; actor?: Actor },
+): LatticeEvent {
+  return factory(
+    'domain.alias',
+    undefined,
+    {
+      alias: input.alias.trim(),
+      canonical: input.canonical.trim(),
+      decidedBy: input.decidedBy ?? 'human',
+    },
+    opts,
+  );
+}
+
 export function exposureShown(
   factory: EventFactory,
   input: { propositionId: Id; surface?: string; reason?: string; day?: string },
@@ -256,6 +274,7 @@ const KNOWN_TYPES: ReadonlySet<string> = new Set<EventType>([
   'interest.observed',
   'interest.declared',
   'interest.removed',
+  'domain.alias',
   'cue.asserted',
   'review.rated',
   'quiz.answered',

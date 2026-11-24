@@ -1,3 +1,4 @@
+import { canonicalizeInterests, createDomainResolver } from './domains.js';
 import { applyGrade, newSchedule } from './fsrs.js';
 import { applyEvidence, emptyMastery, resetMastery } from './mastery.js';
 import type {
@@ -23,6 +24,7 @@ export function emptyState(): LearnerState {
     chains: {},
     interests: {},
     exposures: {},
+    domainAliases: [],
     mastery: {},
     schedule: {},
     reviews: [],
@@ -91,6 +93,10 @@ function asCueKind(v: unknown): CueKind {
 export function replay(events: readonly LatticeEvent[]): LearnerState {
   const state = emptyState();
   for (const event of dedupeAndSort(events)) applyEvent(state, event);
+  // Aliases may be declared after the interests they affect, so canonicalization
+  // is a post-pass rather than part of the fold.
+  const resolver = createDomainResolver(state.domainAliases);
+  state.interests = canonicalizeInterests(state.interests, resolver);
   return state;
 }
 
@@ -177,6 +183,17 @@ function applyEvent(state: LearnerState, e: LatticeEvent): void {
           };
       for (const topic of topics) next.topics[topic] = (next.topics[topic] ?? 0) + 1;
       state.interests[id] = next;
+      return;
+    }
+
+    case 'domain.alias': {
+      const alias = asString(e.payload['alias']);
+      const canonical = asString(e.payload['canonical']);
+      if (!alias || !canonical) return;
+      const decidedBy = asString(e.payload['decidedBy']) ?? 'human';
+      state.domainAliases = state.domainAliases
+        .filter((rule) => rule.alias.toLowerCase() !== alias.toLowerCase())
+        .concat({ alias, canonical, decidedBy, at: e.occurredAt });
       return;
     }
 
@@ -330,6 +347,7 @@ function applyEvent(state: LearnerState, e: LatticeEvent): void {
       state.chains = {};
       state.interests = {};
       state.exposures = {};
+      state.domainAliases = [];
       state.mastery = {};
       state.schedule = {};
       state.reviews = [];

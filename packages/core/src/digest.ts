@@ -45,6 +45,9 @@ export function stateDigest(state: LearnerState): string {
       reviewCount: s.reviewCount,
       lapses: s.lapses,
     })),
+    domainAliases: [...state.domainAliases]
+      .map((rule) => ({ alias: rule.alias, canonical: rule.canonical }))
+      .sort((a, b) => (a.alias < b.alias ? -1 : a.alias > b.alias ? 1 : 0)),
     interests: sortedBy(Object.values(state.interests), (i) => i.id).map((i) => ({
       id: i.id,
       weight: round(i.weight),

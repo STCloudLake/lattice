@@ -3,6 +3,7 @@ import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  aliasDomain,
   assertChain,
   assertCue,
   assertInterest,
@@ -431,5 +432,40 @@ describe('feed command', () => {
     expect(report.items[0]?.reason).toBe('foundation');
     expect(report.items[0]?.domain).toBe('经济学');
     expect(report.domains[0]).toEqual({ name: '经济学', weight: 3, captures: 1 });
+  });
+});
+
+
+describe('domains command', () => {
+  it('merges aliases and reports decayed weights', async () => {
+    const dir = tempDir();
+    let n = 0;
+    const newId = () => 'dm' + String(++n).padStart(3, '0');
+    const factory = createEventFactory({
+      deviceId: 'domains-cli',
+      newId,
+      now: () => new Date('2026-11-24T00:00:00.000Z'),
+    });
+    const events: LatticeEvent[] = [];
+    const a = assertProposition(factory, newId, { statement: '计算机命题。', domain: '计算机' });
+    const b = assertProposition(factory, newId, { statement: 'CS 命题。', domain: 'CS' });
+    events.push(a.event, b.event);
+    events.push(assertInterest(factory, { domain: '计算机', weight: 2 }, { at: '2026-11-24T00:00:00.000Z' }).event);
+    events.push(assertInterest(factory, { domain: 'CS', weight: 3 }, { at: '2026-11-24T00:00:00.000Z' }).event);
+    events.push(aliasDomain(factory, { alias: '机器学习', canonical: '人工智能' }, { at: '2026-11-24T01:00:00.000Z' }));
+
+    const file = join(dir, 'domains.jsonl');
+    writeFileSync(file, exportJsonl(events), 'utf8');
+    const cap = capture();
+    expect(await runCli(['domains', '--in', file, '--json'], cap.io)).toBe(0);
+    const report = JSON.parse(stdout(cap)) as {
+      domains: { canonical: string; weight: number; propositions: number }[];
+      aliases: { alias: string; canonical: string }[];
+    };
+    const computer = report.domains.find((entry) => entry.canonical === '计算机');
+    expect(computer).toBeDefined();
+    expect(computer?.weight).toBe(5);
+    expect(computer?.propositions).toBe(2);
+    expect(report.aliases).toEqual([{ alias: '机器学习', canonical: '人工智能' }]);
   });
 });

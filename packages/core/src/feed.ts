@@ -1,3 +1,4 @@
+import { createDomainResolver, interestWeightAt } from './domains.js';
 import { isDue, retrievability } from './fsrs.js';
 import { masteryOf } from './mastery.js';
 import { pickCue } from './queue.js';
@@ -50,9 +51,10 @@ export function domainMastery(state: LearnerState, domain: string): number {
   const target = domain.trim().toLowerCase();
   let sum = 0;
   let count = 0;
+  const resolver = createDomainResolver(state.domainAliases);
   for (const proposition of Object.values(state.propositions)) {
-    if (proposition.status !== 'active') continue;
-    if ((proposition.domain ?? '').trim().toLowerCase() !== target) continue;
+    if (proposition.status !== 'active' || !proposition.domain) continue;
+    if (resolver(proposition.domain).trim().toLowerCase() !== target) continue;
     sum += masteryOf(state.mastery[proposition.id]);
     count += 1;
   }
@@ -64,8 +66,11 @@ export function domainMastery(state: LearnerState, domain: string): number {
  * Starts at the requested level and steps up only when the domain is understood.
  */
 export function curriculumLevelFor(state: LearnerState, domain: string): DomainLevel {
-  const target = domain.trim().toLowerCase();
-  const declared = Object.values(state.interests).find((i) => i.name.trim().toLowerCase() === target);
+  const resolver = createDomainResolver(state.domainAliases);
+  const target = resolver(domain).trim().toLowerCase();
+  const declared = Object.values(state.interests).find(
+    (i) => resolver(i.name).trim().toLowerCase() === target,
+  );
   const start: DomainLevel = declared?.level ?? 'beginner';
   const avg = domainMastery(state, domain);
   if (start === 'beginner' && avg >= 0.55) return 'intermediate';
@@ -83,16 +88,17 @@ export function curriculumNeeds(
   options: { minPropositions?: number } = {},
 ): CurriculumNeed[] {
   const minPropositions = options.minPropositions ?? 6;
+  const resolver = createDomainResolver(state.domainAliases);
   const counts = new Map<string, number>();
   for (const proposition of Object.values(state.propositions)) {
     if (proposition.status !== 'active' || !proposition.domain) continue;
-    const key = proposition.domain.trim().toLowerCase();
+    const key = resolver(proposition.domain).trim().toLowerCase();
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   const needs: CurriculumNeed[] = [];
   for (const interest of Object.values(state.interests)) {
     if (!interest.declared) continue;
-    const key = interest.name.trim().toLowerCase();
+    const key = resolver(interest.name).trim().toLowerCase();
     const existing = counts.get(key) ?? 0;
     if (existing >= minPropositions) continue;
     needs.push({ domain: interest.name, level: curriculumLevelFor(state, interest.name), existing });
@@ -105,17 +111,18 @@ export function dayOf(iso: ISODate): string {
   return iso.slice(0, 10);
 }
 
-function interestBoost(state: LearnerState, domain: string | undefined): number {
+function interestBoost(state: LearnerState, domain: string | undefined, now: ISODate): number {
   if (!domain) return 1;
-  const target = domain.trim().toLowerCase();
+  const resolver = createDomainResolver(state.domainAliases);
+  const target = resolver(domain).trim().toLowerCase();
   if (target.length === 0) return 1;
   let weight = 0;
   let declared = false;
   for (const interest of Object.values(state.interests)) {
-    if (interest.name.trim().toLowerCase() === target) {
-      weight = Math.max(weight, interest.weight);
-      declared = declared || interest.declared;
-    }
+    if (resolver(interest.name).trim().toLowerCase() !== target) continue;
+    // Interest decays: captures from months ago should not dominate today.
+    weight = Math.max(weight, interestWeightAt(interest, now));
+    declared = declared || interest.declared;
   }
   // Captures are interest evidence; they bias the ordering, never the mastery.
   // An explicitly declared domain outranks one merely inferred from captures.
@@ -172,11 +179,14 @@ export function buildFeed(state: LearnerState, options: FeedOptions): FeedItem[]
     if (!schedule) continue;
 
     const mastery = masteryOf(state.mastery[proposition.id]);
-    const boost = interestBoost(state, proposition.domain);
+    const boost = interestBoost(state, proposition.domain, now);
+    const canonicalDomain = proposition.domain
+      ? createDomainResolver(state.domainAliases)(proposition.domain)
+      : undefined;
     const cueId = pickCue(state, proposition.id);
     const base: Pick<FeedItem, 'propositionId' | 'cueId' | 'domain'> = { propositionId: proposition.id };
     if (cueId) base.cueId = cueId;
-    if (proposition.domain) base.domain = proposition.domain;
+    if (canonicalDomain) base.domain = canonicalDomain;
 
     if (includeReviews && schedule.reviewCount > 0) {
       if (!isDue(schedule, now)) continue;
