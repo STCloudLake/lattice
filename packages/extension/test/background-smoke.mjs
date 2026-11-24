@@ -46,6 +46,7 @@ function createEnv({ extraction, tab } = {}) {
   const chrome = {
     runtime: {
       onInstalled: { addListener: (fn) => (listeners.installed = fn) },
+      onMessage: { addListener: (fn) => (listeners.message = fn) },
       getURL: (p) => 'chrome-extension://test/' + p,
     },
     contextMenus: {
@@ -152,6 +153,21 @@ await check('页面没有正文：报错而不是打开空预览', async () => {
   await waitUntil(() => env.storage.latticePendingCapture, 'empty text');
   assert.equal(env.storage.latticePendingCapture.ok, false);
   assert.match(env.storage.latticePendingCapture.reason, /没有在这个页面提取到正文/);
+});
+
+await check('健康检查：ping 返回 build，供诊断判断后台是否为新版', async () => {
+  const env = createEnv({ extraction: GOOD_EXTRACTION });
+  assert.equal(typeof env.listeners.message, 'function');
+  let replied = null;
+  const kept = env.listeners.message({ type: 'lattice-ping' }, {}, (reply) => {
+    replied = reply;
+  });
+  assert.equal(kept, true);
+  assert.equal(replied.ok, true);
+  assert.equal(typeof replied.build, 'string');
+  assert.ok(replied.build.length > 0);
+  // Unknown messages are ignored.
+  assert.equal(env.listeners.message({ type: 'other' }, {}, () => {}), false);
 });
 
 await check('注入失败（受限页面）：错误被包装成中文提示', async () => {

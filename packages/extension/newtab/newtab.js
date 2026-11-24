@@ -782,6 +782,7 @@ function formatDiagnostics(info, graph) {
   if (info.storage === 'fallback' && !info.persisted) {
     lines.push('  备注: 回退模式下未检测到可用的持久化通道，本次仅内存，关闭页面后丢失');
   }
+  if (info.backgroundLine) lines.push(info.backgroundLine);
   lines.push(`设备 ID: ${info.deviceId}`);
   lines.push(`模型: ${providerSummary(state.provider)}`);
   if (graph) {
@@ -810,6 +811,22 @@ function formatDiagnostics(info, graph) {
   lines.push('');
   lines.push(`生成时间: ${new Date().toISOString()}`);
   return lines.join('\n');
+}
+
+/**
+ * Asks the service worker for its build id. Returns a human line for 诊断:
+ * a stale worker (or none) is reported instead of pretending everything is fine.
+ */
+async function backgroundHealthLine() {
+  const runtime = globalThis.chrome?.runtime;
+  if (!runtime || typeof runtime.sendMessage !== 'function') return '后台: 无法检测（非扩展环境）';
+  try {
+    const reply = await runtime.sendMessage({ type: 'lattice-ping' });
+    if (reply && reply.ok) return `后台: ${reply.build} ✓`;
+    return '后台: 响应异常';
+  } catch {
+    return '后台: 未响应 ✗（在 edge://extensions 点「重新加载」后重试）';
+  }
 }
 
 async function openDiagnostics() {

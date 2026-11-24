@@ -97,6 +97,21 @@ MV3 默认不允许 WebAssembly 编译，默认也不给扩展页面跨源隔离
 - 清单已内置 `https://api.deepseek.com/*`、`https://api.openai.com/*`、
   `http://127.0.0.1:*/*`、`http://localhost:*/*`；本机 provider 不需要额外授权。
 
+## 捕获入口（M1b）
+
+- **点工具栏图标** → 抓当前页面正文 → 打开新标签页 → 自动抽取 → 预览 → 确认入库。
+- **右键选中文字** → 「存入 Lattice（选中文字）」→ 只抓选中部分。
+- 新标签页顶栏「捕获」/ 页脚「捕获文本」→ 手动粘贴。
+
+正文提取（`content/page-extract.js`，注入到当前页）：剔除 nav/header/footer/aside/form/
+aria-hidden，优先 article/main/role=main，否则按段落密度选容器，按块级元素保留段落与列表，
+上限 12000 字；只读、不改页面、不联网。
+
+**改完扩展文件后必须「重新加载」**：`edge://extensions` → 本扩展 → 重新加载。
+只是重启浏览器**不保证**刷新 service worker（Chromium 会按扩展版本缓存代码）。
+诊断里的 `后台: m1b-capture-1 ✓` 就是用来暴露这个问题的——如果显示「后台: 未响应」，
+说明后台是旧版本，重载即可。发版时请同时 bump `manifest.json` 的 version。
+
 ## 捕获文本（M1a）
 
 页脚或空状态的「捕获文本」→ 填标题（可选）+ 粘贴文本 →「抽取」：

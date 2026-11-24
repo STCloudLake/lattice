@@ -12,6 +12,9 @@
  * confirming the preview.
  */
 
+/** Shown in 诊断 so a stale service worker is visible instead of silent. */
+const BUILD = 'm1b-capture-1';
+
 const MENU_SELECTION = 'lattice-capture-selection';
 const PENDING_KEY = 'latticePendingCapture';
 const NEWTAB_URL = 'newtab/newtab.html?capture=1';
@@ -33,6 +36,17 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 
 chrome.action.onClicked.addListener((tab) => {
   void captureInto(tab, { selectionOnly: false });
+});
+
+// Health check: lets the newtab page prove the *current* background script is
+// running. Without it, a stale cached worker looks exactly like "the icon does
+// nothing" (this happened once and cost an hour to diagnose).
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message && message.type === 'lattice-ping') {
+    sendResponse({ ok: true, build: BUILD });
+    return true;
+  }
+  return false;
 });
 
 function reasonOf(error) {

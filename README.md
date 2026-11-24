@@ -35,6 +35,7 @@ npm run verify:e2e     # + loads the extension in a real browser (needs Chrome/E
 2. Enable **Developer mode**
 3. **Load unpacked** → select `packages/extension`
 4. Open a new tab. On first run, click **载入示例包** (load sample pack) to get 8 propositions / 12 cards.
+   On any normal web page, click the toolbar icon to capture that page's main content, or select text and right-click → **存入 Lattice**.
 5. Review a few cards, then open **诊断** to see the digest and the calibration report.
 
 The extension stores its database in the browser's OPFS via a dedicated Web Worker (see [docs/storage.md](docs/storage.md)). It falls back to `chrome.storage` if OPFS is unavailable, and says so in 诊断. This path is covered by an automated test that loads the real extension in headless Edge/Chrome over CDP (`npm run test:e2e`).
