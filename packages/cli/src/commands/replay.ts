@@ -3,6 +3,7 @@ import {
   dueItems,
   masterySummary,
   newItems,
+  prerequisiteEdges,
   replay,
   retrievability,
   stateDigest,
@@ -50,6 +51,8 @@ export interface ReplayReport {
   eventCount: number;
   propositionCount: number;
   cueCount: number;
+  chainCount: number;
+  prerequisiteEdgeCount: number;
   reviewCount: number;
   dueCount: number;
   newCount: number;
@@ -107,6 +110,8 @@ export function buildReplayReport(state: LearnerState, input: ReplayReportInput)
     eventCount: input.eventCount,
     propositionCount: propositions.length,
     cueCount: Object.keys(state.cues).length,
+    chainCount: Object.keys(state.chains).length,
+    prerequisiteEdgeCount: prerequisiteEdges(state).length,
     reviewCount: state.reviews.length,
     dueCount: dueItems(state, input.at).length,
     newCount: newItems(state, Number.POSITIVE_INFINITY).length,
@@ -128,6 +133,8 @@ export function renderReplayReport(report: ReplayReport): string {
       ['事件数', String(report.eventCount)],
       ['命题数', String(report.propositionCount)],
       ['卡片数', String(report.cueCount)],
+      ['推理链', String(report.chainCount)],
+      ['先修关系', String(report.prerequisiteEdgeCount)],
       ['复习数', String(report.reviewCount)],
       ['到期数', String(report.dueCount)],
       ['新学数', String(report.newCount)],

@@ -1,4 +1,13 @@
-import type { Actor, CueKind, EventType, Grade, Id, ISODate, LatticeEvent } from './types.js';
+import type {
+  Actor,
+  CueKind,
+  EventType,
+  Grade,
+  Id,
+  ISODate,
+  LatticeEvent,
+  ProvenanceRef,
+} from './types.js';
 
 export interface EventFactoryOptions {
   deviceId: string;
@@ -61,6 +70,7 @@ export interface PropositionInput {
   name?: string;
   aliases?: string[];
   domain?: string;
+  provenance?: ProvenanceRef[];
   /** Pre-assigned id (used by importers that must stay stable). */
   id?: Id;
 }
@@ -69,14 +79,44 @@ export function assertProposition(
   factory: EventFactory,
   newId: () => Id,
   input: PropositionInput,
-  opts?: { at?: ISODate },
+  opts?: { at?: ISODate; actor?: Actor },
 ): { propositionId: Id; event: LatticeEvent } {
   const propositionId = input.id ?? newId();
   const payload: Record<string, unknown> = { statement: input.statement };
   if (input.name !== undefined) payload.name = input.name;
   if (input.aliases !== undefined) payload.aliases = input.aliases;
   if (input.domain !== undefined) payload.domain = input.domain;
+  if (input.provenance !== undefined) payload.provenance = input.provenance;
   return { propositionId, event: factory('proposition.asserted', propositionId, payload, opts) };
+}
+
+export interface ChainInput {
+  premiseIds: Id[];
+  conclusionId: Id;
+  strength?: number;
+  provenance?: ProvenanceRef[];
+  id?: Id;
+}
+
+/**
+ * A chain says: these premises, *jointly*, imply the conclusion.
+ * The merger is responsible for never emitting a chain whose premises are
+ * treated as independent; this is why the two lists are distinct fields.
+ */
+export function assertChain(
+  factory: EventFactory,
+  newId: () => Id,
+  input: ChainInput,
+  opts?: { at?: ISODate; actor?: Actor },
+): { chainId: Id; event: LatticeEvent } {
+  const chainId = input.id ?? newId();
+  const payload: Record<string, unknown> = {
+    premises: input.premiseIds,
+    conclusion: input.conclusionId,
+  };
+  if (input.strength !== undefined) payload.strength = input.strength;
+  if (input.provenance !== undefined) payload.provenance = input.provenance;
+  return { chainId, event: factory('chain.asserted', chainId, payload, opts) };
 }
 
 export interface CueInput {
@@ -91,7 +131,7 @@ export function assertCue(
   factory: EventFactory,
   newId: () => Id,
   input: CueInput,
-  opts?: { at?: ISODate },
+  opts?: { at?: ISODate; actor?: Actor },
 ): { cueId: Id; event: LatticeEvent } {
   const cueId = input.id ?? newId();
   const payload: Record<string, unknown> = {
@@ -106,7 +146,7 @@ export function assertCue(
 export function rateReview(
   factory: EventFactory,
   input: { propositionId: Id; cueId: Id; grade: Grade },
-  opts?: { at?: ISODate },
+  opts?: { at?: ISODate; actor?: Actor },
 ): LatticeEvent {
   return factory('review.rated', input.propositionId, { cueId: input.cueId, grade: input.grade }, opts);
 }
@@ -114,7 +154,7 @@ export function rateReview(
 export function answerQuiz(
   factory: EventFactory,
   input: { propositionId: Id; cueId?: Id; correct: boolean; latencyMs?: number },
-  opts?: { at?: ISODate },
+  opts?: { at?: ISODate; actor?: Actor },
 ): LatticeEvent {
   const payload: Record<string, unknown> = { correct: input.correct };
   if (input.cueId !== undefined) payload.cueId = input.cueId;
@@ -125,24 +165,25 @@ export function answerQuiz(
 export function mergeProposition(
   factory: EventFactory,
   input: { fromId: Id; intoId: Id; reason?: string },
-  opts?: { at?: ISODate },
+  opts?: { at?: ISODate; actor?: Actor },
 ): LatticeEvent {
   const payload: Record<string, unknown> = { intoId: input.intoId };
   if (input.reason !== undefined) payload.reason = input.reason;
   return factory('proposition.merged', input.fromId, payload, opts);
 }
 
-export function resetMasteryEvent(factory: EventFactory, propositionId: Id, opts?: { at?: ISODate }): LatticeEvent {
+export function resetMasteryEvent(factory: EventFactory, propositionId: Id, opts?: { at?: ISODate; actor?: Actor }): LatticeEvent {
   return factory('mastery.reset', propositionId, {}, opts);
 }
 
-export function clearedDataEvent(factory: EventFactory, opts?: { at?: ISODate }): LatticeEvent {
+export function clearedDataEvent(factory: EventFactory, opts?: { at?: ISODate; actor?: Actor }): LatticeEvent {
   return factory('data.cleared', undefined, {}, opts);
 }
 
 const KNOWN_TYPES: ReadonlySet<string> = new Set<EventType>([
   'proposition.asserted',
   'proposition.merged',
+  'chain.asserted',
   'cue.asserted',
   'review.rated',
   'quiz.answered',

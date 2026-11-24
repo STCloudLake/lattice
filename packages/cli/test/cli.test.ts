@@ -3,6 +3,7 @@ import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  assertChain,
   assertCue,
   assertProposition,
   createEventFactory,
@@ -14,6 +15,7 @@ import {
   stateDigest,
   type LatticeEvent,
 } from '@lattice/core';
+import { buildReplayReport } from '../src/commands/replay.js';
 import { runCli, type CliIO } from '../src/cli.js';
 import { diagnoseLog } from '../src/commands/doctor.js';
 import { createStepClock } from '../src/fileio.js';
@@ -336,5 +338,59 @@ describe('lattice cli', () => {
     const report = JSON.parse(stdout(replayed)) as { propositionCount: number; eventCount: number };
     expect(report.propositionCount).toBe(6);
     expect(report.eventCount).toBe(18);
+  });
+});
+
+
+describe('reasoning chains in the CLI', () => {
+  function chainLog() {
+    let n = 0;
+    const newId = () => 'e' + String(++n).padStart(3, '0');
+    const factory = createEventFactory({
+      deviceId: 'chain-test',
+      newId,
+      now: () => new Date('2026-11-24T00:00:00.000Z'),
+    });
+    const a = assertProposition(factory, newId, { statement: '前提 A 成立。' });
+    const b = assertProposition(factory, newId, { statement: '前提 B 成立。' });
+    const c = assertProposition(factory, newId, { statement: '所以结论 C 成立。' });
+    const chain = assertChain(factory, newId, {
+      premiseIds: [a.propositionId, b.propositionId],
+      conclusionId: c.propositionId,
+      strength: 0.7,
+    });
+    return [a.event, b.event, c.event, chain.event];
+  }
+
+  it('reports chain and prerequisite counts on replay', () => {
+    const events = chainLog();
+    const report = buildReplayReport(replay(events), {
+      inPath: 'inline',
+      at: '2026-11-24T00:00:00.000Z',
+      eventCount: events.length,
+      parseErrors: 0,
+    });
+    expect(report.chainCount).toBe(1);
+    expect(report.prerequisiteEdgeCount).toBe(2);
+    expect(report.propositionCount).toBe(3);
+  });
+
+  it('accepts a well-formed chain in doctor', () => {
+    const report = diagnoseLog(exportJsonl(chainLog()), 'inline');
+    expect(report.ok).toBe(true);
+    expect(report.problems.orphanChains).toHaveLength(0);
+  });
+
+  it('flags a chain that points at a missing proposition', () => {
+    const events = chainLog();
+    const broken = events.map((event) =>
+      event.type === 'chain.asserted'
+        ? { ...event, payload: { ...event.payload, conclusion: 'missing-id' } }
+        : event,
+    );
+    const report = diagnoseLog(exportJsonl(broken), 'inline');
+    expect(report.ok).toBe(false);
+    expect(report.problems.orphanChains).toHaveLength(1);
+    expect(report.problems.orphanChains[0]?.missing).toContain('missing-id');
   });
 });

@@ -17,8 +17,18 @@ export function stateDigest(state: LearnerState): string {
     });
 
   const snapshot = {
-    propositions: sortedBy(Object.values(state.propositions), (p) => p.id),
+    propositions: sortedBy(Object.values(state.propositions), (p) => p.id).map((p) => ({
+      ...p,
+      provenance: undefined, // provenance is source metadata, not learner state
+    })),
     cues: sortedBy(Object.values(state.cues), (c) => c.id),
+    chains: sortedBy(Object.values(state.chains), (c) => c.id).map((c) => ({
+      id: c.id,
+      conclusionId: c.conclusionId,
+      premiseIds: [...c.premiseIds].sort(),
+      strength: round(c.strength),
+      createdAt: c.createdAt,
+    })),
     mastery: sortedBy(Object.values(state.mastery), (m) => m.propositionId).map((m) => ({
       propositionId: m.propositionId,
       // Round so IEEE noise across engines cannot change the digest.
@@ -59,6 +69,7 @@ export function stateSummary(state: LearnerState): Record<string, number> {
   return {
     propositions: Object.keys(state.propositions).length,
     cues: Object.keys(state.cues).length,
+    chains: Object.keys(state.chains).length,
     reviews: state.reviews.length,
     eventsDigestInputs: Object.keys(state.mastery).length,
   };

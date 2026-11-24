@@ -14,6 +14,7 @@ export type Actor = 'human' | 'system' | `llm:${string}`;
 export type EventType =
   | 'proposition.asserted'
   | 'proposition.merged'
+  | 'chain.asserted'
   | 'cue.asserted'
   | 'review.rated'
   | 'quiz.answered'
@@ -40,6 +41,16 @@ export interface LatticeEvent {
   payload: Record<string, unknown>;
 }
 
+/** Where a claim came from. Kept coarse on purpose: no full-text copies. */
+export interface ProvenanceRef {
+  sourceKind: 'page' | 'pdf' | 'video' | 'note' | 'paste' | 'import' | 'session';
+  sourceUri?: string;
+  title?: string;
+  /** A short quote anchoring the claim to the source. Never the whole source. */
+  span?: { quote?: string; start?: number; end?: number };
+  capturedAt: ISODate;
+}
+
 export type PropositionStatus = 'active' | 'superseded' | 'archived';
 
 /** K ledger: an objective claim. Never carries learner state. */
@@ -52,6 +63,21 @@ export interface Proposition {
   status: PropositionStatus;
   createdAt: ISODate;
   mergedInto?: Id;
+  provenance: ProvenanceRef[];
+}
+
+/**
+ * K ledger: a reasoning chain. Premises are used *jointly*: "A and B imply C"
+ * is not "A implies C". Chains are the only source of prerequisite structure.
+ */
+export interface Chain {
+  id: Id;
+  conclusionId: Id;
+  premiseIds: Id[];
+  /** Extractor confidence, 0..1. Low-strength chains should not drive paths. */
+  strength: number;
+  createdAt: ISODate;
+  provenance: ProvenanceRef[];
 }
 
 export type CueKind = 'recall' | 'cloze' | 'apply' | 'contrast';
@@ -121,6 +147,7 @@ export interface MasterySummary {
 export interface LearnerState {
   propositions: Record<Id, Proposition>;
   cues: Record<Id, Cue>;
+  chains: Record<Id, Chain>;
   mastery: Record<Id, MasteryState>;
   schedule: Record<Id, ScheduleState>;
   reviews: ReviewLog[];

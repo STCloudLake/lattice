@@ -13,7 +13,7 @@ import { build } from 'esbuild';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
 
-const coreEntry = path.join(root, 'packages/core/src/index.ts');
+const coreEntry = path.join(root, 'packages/extract/src/bundle.ts');
 const vendor = path.join(root, 'packages/extension/vendor');
 const sqliteDist = path.join(root, 'node_modules/@sqlite.org/sqlite-wasm/dist');
 

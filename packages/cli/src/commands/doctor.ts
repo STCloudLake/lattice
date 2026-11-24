@@ -31,6 +31,12 @@ export interface OrphanReviewProblem {
   propositionId: string;
 }
 
+export interface OrphanChainProblem {
+  line: number;
+  chainId: string;
+  missing: string[];
+}
+
 export interface SequenceProblem {
   line: number;
   deviceId: string;
@@ -44,6 +50,7 @@ export interface DoctorProblems {
   duplicateIds: DuplicateIdProblem[];
   orphanCues: OrphanCueProblem[];
   orphanReviews: OrphanReviewProblem[];
+  orphanChains: OrphanChainProblem[];
   nonMonotonicSeq: SequenceProblem[];
 }
 
@@ -64,6 +71,7 @@ function emptyProblems(): DoctorProblems {
     duplicateIds: [],
     orphanCues: [],
     orphanReviews: [],
+    orphanChains: [],
     nonMonotonicSeq: [],
   };
 }
@@ -162,6 +170,19 @@ export function diagnoseLog(text: string, source: string): DoctorReport {
       }
     }
 
+    if (event.type === 'chain.asserted') {
+      const conclusion = event.payload['conclusion'];
+      const rawPremises = event.payload['premises'];
+      const refs = [
+        ...(Array.isArray(rawPremises) ? rawPremises.filter((x): x is string => typeof x === 'string') : []),
+        ...(typeof conclusion === 'string' ? [conclusion] : []),
+      ];
+      const missing = refs.filter((ref) => !propositionIds.has(ref));
+      if (missing.length > 0) {
+        problems.orphanChains.push({ line, chainId: event.subjectId ?? event.id, missing });
+      }
+    }
+
     if (event.type === 'review.rated') {
       const propositionId = referencedPropositionId(event) ?? event.subjectId;
       if (propositionId && !propositionIds.has(propositionId)) {
@@ -176,6 +197,7 @@ export function diagnoseLog(text: string, source: string): DoctorReport {
     problems.duplicateIds.length +
     problems.orphanCues.length +
     problems.orphanReviews.length +
+    problems.orphanChains.length +
     problems.nonMonotonicSeq.length;
 
   return {
@@ -202,6 +224,7 @@ function detailLines(report: DoctorReport): string[] {
   push(problems.duplicateIds.map((p) => `${p.id} 出现在第 ${p.lines.join(', ')} 行`));
   push(problems.orphanCues.map((p) => `第 ${p.line} 行：卡片 ${p.cueId} 指向不存在的命题 ${p.propositionId}`));
   push(problems.orphanReviews.map((p) => `第 ${p.line} 行：复习 ${p.eventId} 指向不存在的命题 ${p.propositionId}`));
+  push(problems.orphanChains.map((p) => `第 ${p.line} 行：推理链 ${p.chainId} 指向不存在的命题 ${p.missing.join(', ')}`));
   push(
     problems.nonMonotonicSeq.map(
       (p) => `第 ${p.line} 行：设备 ${p.deviceId} 的 seq=${p.seq} 不大于前值 ${p.previousSeq}`,
@@ -232,6 +255,7 @@ export function renderDoctorReport(report: DoctorReport): string {
     ['重复事件 id', report.problems.duplicateIds.length],
     ['孤立卡片事件', report.problems.orphanCues.length],
     ['孤立复习事件', report.problems.orphanReviews.length],
+    ['孤立推理链', report.problems.orphanChains.length],
     ['seq 非单调', report.problems.nonMonotonicSeq.length],
   ];
   const labelWidth = rows.reduce((max, row) => Math.max(max, displayWidth(row[0])), 0);
